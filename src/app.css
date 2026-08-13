@@ -1,0 +1,149 @@
+:root {
+  --phi-bg: #0a0a0c;
+  --phi-panel: rgba(255, 255, 255, 0.04);
+  --phi-border: rgba(255, 255, 255, 0.16);
+  --phi-accent: #d0d0d0;
+  --phi-text: #e8e8e8;
+  --phi-text-dim: rgba(232, 232, 232, 0.5);
+  --phi-mono: 'Courier New', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: var(--phi-bg);
+  color: var(--phi-text);
+  font-family:
+    'Outfit',
+    'NotoSansSC',
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    'PingFang SC',
+    'Microsoft YaHei',
+    sans-serif;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 扁平黑白按钮（极客风） */
+button {
+  outline: none;
+  border: 1px solid #e8e8e8;
+  background: transparent;
+  color: #e8e8e8;
+  padding: 0.75rem 1.5rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  border-radius: 2px;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.1s ease;
+}
+
+button:hover {
+  background: #e8e8e8;
+  color: #0a0a0c;
+}
+
+button:active {
+  transform: scale(0.97);
+}
+
+a {
+  color: var(--phi-accent);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+a:hover {
+  border-bottom-color: #fff;
+}
+
+input[type='range'] {
+  accent-color: #e8e8e8;
+}
+
+select,
+input[type='text'] {
+  background: #121215;
+  border: 1px solid #3a3a40;
+  color: #e8e8e8;
+  border-radius: 2px;
+  padding: 8px 12px;
+  font-family: inherit;
+}
+
+select option {
+  background: #121215;
+  color: #e8e8e8;
+}
+
+/* 通用页面容器 */
+.phi-page {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.phi-title {
+  font-size: 2.2rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  margin: 0;
+}
+
+.phi-subtitle {
+  color: var(--phi-text-dim);
+  font-size: 1rem;
+  margin: 0 0 24px;
+}
+
+.phi-card {
+  background: var(--phi-panel);
+  border: 1px solid var(--phi-border);
+  border-radius: 2px;
+  padding: 20px;
+  width: min(720px, 90vw);
+}
+
+.phi-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.phi-row:last-child {
+  border-bottom: none;
+}
+
+.phi-label {
+  font-size: 0.95rem;
+}
+
+.phi-hint {
+  color: var(--phi-text-dim);
+  font-size: 0.8rem;
+  font-family: var(--phi-mono);
+}

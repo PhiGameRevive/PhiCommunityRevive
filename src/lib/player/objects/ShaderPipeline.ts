@@ -1,0 +1,471 @@
+/*
+ * Derived from Team-PhiZone/player (https://github.com/Team-PhiZone/player).
+ * SPDX-License-Identifier: MPL-2.0
+ * Modified by PhiCommunity Revive for web-only usage.
+ */
+import { Filters, Renderer } from 'phaser';
+import type { Game } from '../scenes/Game';
+import type { AnimatedVariable, ShaderEffect, VariableEvent } from '$lib/types';
+import {
+  findLeaves,
+  findLowestCommonAncestorArray,
+  getEventValue,
+  mostFrequentElement,
+  processEvents,
+  toBeats,
+} from '../utils';
+import type { ShaderNode } from './ShaderNode';
+import { Node, ROOT } from './Node';
+import { m } from '$lib/messages';
+
+const DEFAULT_VALUE_REGEX = /uniform\s+(\w+)\s+(\w+);\s+\/\/\s+%([^%]+)%/g;
+
+function transformForLoops(src: string, max = 1024): string {
+  const findMatchingBrace = (code: string, openIdx: number): number => {
+    let depth = 0;
+    let i = openIdx;
+    while (i < code.length) {
+      const ch = code[i];
+      // line comments
+      if (ch === '/' && code[i + 1] === '/') {
+        i += 2;
+        while (i < code.length && code[i] !== '\n') i++;
+        continue;
+      }
+      // block comments
+      if (ch === '/' && code[i + 1] === '*') {
+        i += 2;
+        while (i < code.length && !(code[i] === '*' && code[i + 1] === '/')) i++;
+        i += 2;
+        continue;
+      }
+      // strings
+      if (ch === '"' || ch === "'" || ch === '`') {
+        const quote = ch;
+        i++;
+        while (i < code.length) {
+          if (code[i] === '\\') {
+            i += 2; // skip escaped char
+            continue;
+          }
+          if (code[i] === quote) {
+            i++;
+            break;
+          }
+          i++;
+        }
+        continue;
+      }
+      if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0) return i;
+      }
+      i++;
+    }
+    return -1;
+  };
+
+  const headerRe =
+    /for\s*\(\s*(int|float)\s+([A-Za-z_]\w*)\s*=\s*([^;]+?)\s*;\s*([^;]+?)\s*;\s*([^)]+?)\s*\)/y; // sticky
+
+  const makeHead = (type: string, varName: string, init: string, cond: string, iter: string) => {
+    const idx = `_${varName}_iter`;
+    const limit = type === 'int' ? `${max}` : `${max}.0`;
+    const it = iter.trim();
+    let step: string | null = null;
+    if (/\+\+/.test(it)) step = type === 'int' ? '1' : '1.0';
+    else if (/--/.test(it)) step = type === 'int' ? '-1' : '-1.0';
+    else {
+      const plusEq = new RegExp(`^${varName}\\s*\\+=\\s*(.+)$`);
+      const minusEq = new RegExp(`^${varName}\\s*-=` + '\\s*(.+)$');
+      const p = it.match(plusEq);
+      const m = it.match(minusEq);
+      if (p) step = p[1].trim();
+      if (m) step = `-(${m[1].trim()})`;
+      if (step && type === 'float' && !/[.|eE]/.test(step)) step = `${step}.0`;
+    }
+    if (!step) step = type === 'int' ? '1' : '1.0';
+    const assign = `${type} ${varName} = (${init.trim()}) + (${step}) * ${idx};`;
+    const check = `if (!(${cond.trim()})) break;`;
+    return {
+      head: `for (${type} ${idx} = ${type === 'int' ? '0' : '0.0'}; ${idx} < ${limit}; ${idx}++) { ${assign} ${check} `,
+      idx,
+      step,
+    };
+  };
+
+  const replaceIndexInZone = (zone: string, varName: string, expr: string): string => {
+    const bracketRe = new RegExp(`\\[\\s*${varName}\\s*\\]`, 'g');
+    return zone.replace(bracketRe, `[${expr}]`);
+  };
+
+  let i = 0;
+  let out = '';
+  while (i < src.length) {
+    // Skip until a potential 'for ('
+    if (src[i] !== 'f') {
+      out += src[i++];
+      continue;
+    }
+    headerRe.lastIndex = i;
+    const m = headerRe.exec(src);
+    if (!m) {
+      out += src[i++];
+      continue;
+    }
+    const [_, type, varName, init, cond, iter] = m;
+    // Append content before the loop
+    out += src.slice(i, m.index);
+    // After header, determine if next non-space is '{' or single statement
+    let j = headerRe.lastIndex;
+    while (j < src.length && /\s/.test(src[j])) j++;
+    const { head, idx, step } = makeHead(type, varName, init, cond, iter);
+    const indexExpr = `(${init.trim()}) + (${step}) * ${idx}`;
+    if (src[j] === '{') {
+      const bodyStart = j + 1;
+      const bodyEnd = findMatchingBrace(src, j);
+      const body = bodyEnd >= 0 ? src.slice(bodyStart, bodyEnd) : src.slice(bodyStart);
+      // First transform nested loops inside body
+      const nestedTransformed = transformForLoops(body, max);
+      // Then replace indexing occurrences for the current varName
+      const replacedBody = replaceIndexInZone(nestedTransformed, varName, indexExpr);
+      out += head + replacedBody + ' }';
+      i = bodyEnd >= 0 ? bodyEnd + 1 : src.length;
+    } else {
+      // Single statement; capture until ';'
+      const stmtStart = j;
+      let stmtEnd = stmtStart;
+      while (stmtEnd < src.length && src[stmtEnd] !== ';') stmtEnd++;
+      const stmt = src.slice(stmtStart, stmtEnd + 1);
+      const replacedStmt = replaceIndexInZone(stmt, varName, indexExpr);
+      out += head + replacedStmt + ' }';
+      i = stmtEnd + 1;
+    }
+  }
+  return out;
+}
+
+type ShaderFilterNodeManager = Renderer.WebGL.RenderNodes.RenderNodeManager;
+type ProgramManager = InstanceType<typeof Renderer.WebGL.ProgramManager>;
+
+/**
+ * Custom filter render node for user-provided fragment shaders.
+ * Each shader effect gets its own render node instance registered by name.
+ */
+class ShaderFilterNode extends Renderer.WebGL.RenderNodes.BaseFilterShader {
+  declare programManager: ProgramManager;
+
+  constructor(name: string, manager: ShaderFilterNodeManager, fragShader: string) {
+    super(name, manager, undefined, fragShader);
+  }
+
+  setupTextures(controller: ShaderFilter, textures: Renderer.WebGL.Wrappers.WebGLTextureWrapper[]) {
+    const extraTextures = controller.extraTextures;
+    for (let i = 0; i < extraTextures.length; i++) {
+      textures[i + 1] = extraTextures[i];
+    }
+  }
+
+  setupUniforms(controller: ShaderFilter) {
+    const pm = this.programManager;
+    const uniforms = controller.uniforms;
+    for (const [name, value] of Object.entries(uniforms)) {
+      pm.setUniform(name, value);
+    }
+  }
+}
+
+export class ShaderFilter extends Filters.Controller {
+  private _scene: Game;
+  private _data: ShaderEffect;
+  private _node?: ShaderNode;
+  private _animators: VariableAnimator[] = [];
+  private _targetsCollected: boolean = false;
+  private _isLoaded: boolean = false;
+  private _uniforms: Record<string, number | number[]> = {};
+  private _extraTextures: Renderer.WebGL.Wrappers.WebGLTextureWrapper[] = [];
+  private _renderNodeName: string;
+
+  constructor(
+    camera: Phaser.Cameras.Scene2D.Camera,
+    renderNodeName: string,
+    scene: Game,
+    fragShader: string,
+    data: ShaderEffect,
+    target?: ShaderNode,
+  ) {
+    fragShader = fragShader
+      .replaceAll('uv', 'outTexCoord')
+      .replaceAll('screenTexture', 'uMainSampler');
+    fragShader = transformForLoops(fragShader);
+
+    // Register the render node for this shader
+    const renderer = scene.renderer as Phaser.Renderer.WebGL.WebGLRenderer;
+    renderer.renderNodes.addNode(
+      renderNodeName,
+      new ShaderFilterNode(renderNodeName, renderer.renderNodes, fragShader),
+    );
+
+    super(camera, renderNodeName);
+
+    this._renderNodeName = renderNodeName;
+    this._scene = scene;
+    this._data = data;
+    this._data.startBeat = toBeats(this._data.start);
+    this._data.endBeat = toBeats(this._data.end);
+    if (target) {
+      this._node = target;
+    }
+
+    [...fragShader.matchAll(DEFAULT_VALUE_REGEX)].map((uniform) => {
+      const type = uniform[1];
+      const name = uniform[2];
+      const value = uniform[3];
+
+      if (!this._data.vars) this._data.vars = {};
+      if (Object.prototype.hasOwnProperty.call(this._data.vars, name)) return;
+
+      switch (type) {
+        case 'float': {
+          this._data.vars[name] = parseFloat(value);
+          break;
+        }
+        case 'vec2':
+        case 'vec3':
+        case 'vec4': {
+          this._data.vars[name] = value.split(',').map((v) => parseFloat(v.trim()));
+          break;
+        }
+        case 'sampler2D': {
+          this._data.vars[name] = value;
+          break;
+        }
+        default: {
+          throw Error(`Unknown type of uniform in shader ${this._data.shader}: ${type}`);
+        }
+      }
+    });
+
+    if (this._data.vars) {
+      const vars = this._data.vars;
+      Object.entries(vars).forEach(([key, value]) => {
+        if (Array.isArray(value)) {
+          if (typeof value[0] === 'number') {
+            vars[key] = this.correctRange(key, value as number[]);
+          } else {
+            this._animators.push(new VariableAnimator(this, key, value as AnimatedVariable));
+          }
+        }
+      });
+    }
+
+    try {
+      this.boot();
+    } catch (e) {
+      console.error(e + '\n\nAt ' + data.shader + ':\n\n' + fragShader);
+    }
+  }
+
+  boot(): void {
+    if (this._data.vars) {
+      let textureSlot = 1;
+      Object.entries(this._data.vars).forEach(([key, value]) => {
+        if (typeof value === 'number' || (Array.isArray(value) && typeof value[0] === 'number')) {
+          this.setUniformValue(key, value, 0);
+        } else if (typeof value === 'string') {
+          if (!this._scene.textures.exists(value)) {
+            alert(
+              m.error_shader_texture_missing({
+                name: value,
+                shader: this._data.shader,
+              }),
+            );
+            return;
+          }
+          const texture = this._scene.textures.get(`asset-${value}`).source[0].glTexture;
+          if (texture) {
+            this._uniforms[key] = textureSlot;
+            this._extraTextures[textureSlot - 1] = texture;
+            textureSlot++;
+          }
+        }
+      });
+    }
+    this._isLoaded = true;
+    console.debug('Shader', this._data.shader, 'loaded');
+  }
+
+  update(beat: number, time: number) {
+    if (!this._isLoaded || !this.active) {
+      return;
+    }
+    if (this._data.targetRange && this._node && !this._targetsCollected) {
+      this._targetsCollected = true;
+      const range = this._data.targetRange;
+      let targets = this._scene.objects
+        .filter((o) => {
+          if ('upperDepth' in o) return false;
+          return o.depth >= range.minZIndex && o.depth < range.maxZIndex;
+        })
+        .sort((a, b) => a.depth - b.depth);
+      if (targets.length === 0) return;
+      console.debug('Potential targets for', this._node.name, targets);
+      let parent;
+      if (targets.length === 1) {
+        parent = targets[0].parent;
+      } else {
+        const { lca, distance } = findLowestCommonAncestorArray(targets);
+        parent = lca;
+        if (range.exclusive && findLeaves(lca, distance).length > targets.length) {
+          const result = mostFrequentElement(targets.map((target) => target.parent));
+          targets = result!.element.children;
+          parent = result!.element;
+        }
+        const result = new Set<Node>();
+        for (const t of targets) {
+          let target = t;
+          while (target.treeDepth > lca.treeDepth + 1) {
+            target = target.parent;
+          }
+          result.add(target);
+        }
+        targets = Array.from(result);
+      }
+      console.debug('Parent:', parent?.name);
+      if (parent !== ROOT) {
+        parent.addChild(this._node);
+        (parent as ShaderNode).object.add(this._node.object);
+      }
+      console.debug('Adding targets to', this._renderNodeName, this._data, targets);
+      targets.forEach((target) => {
+        this._node!.addChild(target);
+        this._node!.object.add(target.object);
+      });
+      console.debug(
+        'Current tree:',
+        this._scene.objects
+          .map((o) => `\n${o.name} ${o.parent === ROOT ? 'ROOT' : o.parent.name}`)
+          .join(''),
+      );
+    }
+    try {
+      this._uniforms['time'] = time;
+      const renderer = this._scene.renderer as Phaser.Renderer.WebGL.WebGLRenderer;
+      this._uniforms['screenSize'] = [renderer.width, renderer.height];
+      this._animators.forEach((animator) => animator.update(beat));
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  detach(beat: number) {
+    this.active = beat > this._data.startBeat && beat <= this._data.endBeat;
+    if (!this._isLoaded || !this._node) {
+      return;
+    }
+    if (!this.active) {
+      if (this._targetsCollected && !this._node.parent) {
+        this._targetsCollected = false;
+        console.debug('Removing targets from', this._renderNodeName);
+        this._node.object.removeAll();
+        this._node.removeAll();
+      }
+    }
+  }
+
+  setUniformValue(name: string, value: number | number[] | unknown, beat: number) {
+    if (!value && value !== 0) return;
+    console.debug(beat.toFixed(3), this._renderNodeName, name, value);
+    if (Array.isArray(value)) {
+      this._uniforms[name] = value as number[];
+    } else if (typeof value === 'number') {
+      this._uniforms[name] = value;
+    }
+  }
+
+  correctRange(name: string, value: number[], force = false) {
+    if (
+      force ||
+      (['color', 'rgb', 'rgba'].some((e) => name.toLowerCase().includes(e)) &&
+        value.length > 2 &&
+        (value[0] > 1 || value[1] > 1 || value[2] > 1 || (value.length > 3 && value[3] > 1)))
+    ) {
+      value = Array(value.length)
+        .fill(0)
+        .map((_, i) => value[i] / 255);
+      console.warn(
+        `Dividing values of ${name} in ${this._data.shader} by 255 as this variable seems to represent an RGB(A) color but has values greater than 1.`,
+      );
+    }
+    return value;
+  }
+
+  get uniforms() {
+    return this._uniforms;
+  }
+
+  get extraTextures() {
+    return this._extraTextures;
+  }
+
+  get scene() {
+    return this._scene;
+  }
+}
+
+class VariableAnimator {
+  private _shader: ShaderFilter;
+  private _name: string;
+  private _events: VariableEvent[];
+  private _cur: number = 0;
+
+  constructor(shader: ShaderFilter, name: string, events: AnimatedVariable) {
+    this._shader = shader;
+    this._name = name;
+    this._events = events;
+    processEvents(
+      this._events,
+      undefined,
+      undefined,
+      `Var ${name}, Shader ${this._shader.scene.metadata.title}`,
+    );
+    if (
+      ['color', 'tint', 'rgb', 'rgba'].some((e) => name.toLowerCase().includes(e)) &&
+      this._events.some((e) =>
+        [e.start, e.end].some(
+          (f) =>
+            Array.isArray(f) &&
+            typeof f[0] === 'number' &&
+            f.length > 2 &&
+            (f[0] > 1 || f[1] > 1 || f[2] > 1 || (f.length > 3 && f[3] > 1)),
+        ),
+      )
+    ) {
+      this._events = this._events.map((event) => ({
+        ...event,
+        start: this._shader.correctRange(name, event.start as number[], true),
+        end: this._shader.correctRange(name, event.end as number[], true),
+      }));
+    } // shit but elegant !!!???
+  }
+
+  update(beat: number) {
+    this._shader.setUniformValue(this._name, this.handleEvent(beat), beat);
+  }
+
+  handleEvent(beat: number) {
+    if (this._events && this._events.length > 0) {
+      if (this._cur > 0 && beat <= this._events[this._cur].startBeat) {
+        this._cur = 0;
+      }
+      while (this._cur < this._events.length - 1 && beat > this._events[this._cur + 1].startBeat) {
+        this._cur++;
+      }
+      return getEventValue(this._events[this._cur], beat, this._shader.scene.bpmList);
+    } else {
+      return undefined;
+    }
+  }
+}

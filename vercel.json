@@ -2,7 +2,7 @@
     "version": 2,
     "buildCommand": "pnpm build",
     "installCommand": "pnpm i",
-    "outputDirectory": "dist",
+    "outputDirectory": "build",
     "github": {
         "silent": true
     }

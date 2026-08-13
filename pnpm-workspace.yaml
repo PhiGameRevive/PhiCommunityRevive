@@ -1,0 +1,4 @@
+allowBuilds:
+  esbuild: true
+patchedDependencies:
+  phaser4-rex-plugins@4.2.0: patches/phaser4-rex-plugins@4.2.0.patch
