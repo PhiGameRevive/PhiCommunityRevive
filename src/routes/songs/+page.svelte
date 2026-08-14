@@ -7,6 +7,8 @@
   import { fetchSongs, SOURCE_LABELS, type ChartSourceId, type SourceSong } from '$lib/sources';
   import { fetchPzCharts, fetchPzChartFile, getToken, login, setToken, PZ_LEVEL_TYPE } from '$lib/phizone';
   import { alert as alertModal, prompt as pzPrompt } from '$lib/modal';
+  import { loadPreferences } from '$lib/preferences';
+  import { preparePlay, setPendingPlay, type PlaySource } from '$lib/playLoader';
 
   const LEVELS: Level[] = ['ez', 'hd', 'in', 'at', 'sp'];
   const LEVEL_LABELS: Record<Level, string> = {
@@ -48,8 +50,15 @@
 
   let starting = false;
   let showOverview = false;
+  let loadProgress = 0;
+  let loadDetail = '';
 
   // ---- Phigros loading 动画（复刻 ploading.js）----
+  // 以逻辑像素绘制，backing store 放大 LOADING_DPR 倍保证文字锐利
+  const LOADING_W = 340;
+  const LOADING_H = 160;
+  const LOADING_DPR = 2;
+
   let loadingCanvas: HTMLCanvasElement | undefined;
   let animId = 0;
   let animStart = 0;
@@ -57,38 +66,74 @@
   const drawLoading = (now: number) => {
     const canvas = loadingCanvas;
     const ctx = canvas?.getContext('2d');
-    if (!canvas || !ctx) return;
-    const w = canvas.width;
-    const h = canvas.height;
+    if (!canvas || !ctx) {
+      // canvas 尚未挂载（starting 刚置位）→ 下一帧重试，否则动画永远不会开始
+      if (starting) animId = requestAnimationFrame(drawLoading);
+      return;
+    }
+    const w = LOADING_W;
+    const h = LOADING_H;
+    ctx.setTransform(LOADING_DPR, 0, 0, LOADING_DPR, 0, 0);
     const t = (now - animStart) / 15;
     ctx.clearRect(0, 0, w, h);
-    ctx.font = '26px "Courier New", ui-monospace, monospace';
+    ctx.font = '34px "Courier New", ui-monospace, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#ffffff';
     const msg = 'LOADING';
     const dxs = ctx.measureText(msg).width;
     ctx.globalCompositeOperation = 'xor';
-    const hw = 20 + dxs / 2;
+    const hw = 26 + dxs / 2;
     ctx.fillRect(
       Math.sin(t / 20) < 0 ? Math.cos(t / 20) * hw + w / 2 : w / 2 - hw,
-      h / 2 - 25,
+      h / 2 - 33,
       -Math.cos(t / 20) * hw + hw,
-      50,
+      66,
     );
     ctx.fillText(msg, w / 2, h / 2);
     ctx.globalCompositeOperation = 'source-over';
+    // 真实下载进度条（位于 LOADING 字样下方）
+    const barW = hw * 2;
+    const barX = w / 2 - hw;
+    const barY = h / 2 + 45;
+    const barH = 5;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.22)';
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(barX, barY, barW * loadProgress, barH);
+    if (loadDetail) {
+      ctx.font = '16px "Courier New", ui-monospace, monospace';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.72)';
+      ctx.fillText(loadDetail, w / 2, barY + 22);
+    }
     animId = requestAnimationFrame(drawLoading);
   };
 
-  const beginTransition = (target: string) => {
-    if (starting) return;
+  const startLoadingAnimation = () => {
     starting = true;
+    loadProgress = 0;
+    loadDetail = '';
     animStart = performance.now();
     cancelAnimationFrame(animId);
     animId = requestAnimationFrame(drawLoading);
-    // 延迟 2 秒加载完成后开始
-    setTimeout(() => goto(target), 2000);
+  };
+
+  const stopLoadingAnimation = () => {
+    cancelAnimationFrame(animId);
+    animId = 0;
+    starting = false;
+    loadProgress = 0;
+    loadDetail = '';
+  };
+
+  /** LOADING 动画的最短展示时长，避免资源命中缓存时一闪而过。 */
+  const MIN_LOADING_MS = 900;
+
+  const waitForMinimumLoading = async () => {
+    const elapsed = performance.now() - animStart;
+    if (elapsed < MIN_LOADING_MS) {
+      await new Promise((resolve) => setTimeout(resolve, MIN_LOADING_MS - elapsed));
+    }
   };
 
   const currentList = (): SongItem[] =>
@@ -225,6 +270,7 @@
   });
 
   onDestroy(() => {
+    cancelAnimationFrame(animId);
     window.removeEventListener('pointermove', onPointerMove);
     window.removeEventListener('pointerup', onPointerUp);
     window.removeEventListener('pointercancel', onPointerUp);
@@ -302,6 +348,39 @@
     }
   };
 
+  /** 写入 sessionStorage 供刷新/直接进入 /play 时还原（剔除不可序列化的本地 Blob）。 */
+  const rememberSong = (item: SongItem) => {
+    const { local: _local, ...serializable } = item;
+    sessionStorage.setItem('currentSong', JSON.stringify(serializable));
+    sessionStorage.setItem('currentLevel', level);
+  };
+
+  /**
+   * 预加载并跳转：在选歌页的 LOADING 动画期间把谱面、曲绘、音频下载完毕，
+   * 组装好 Config 寄存给游玩页，再跳转。这样游玩页拿到的都是本地 blob，不再有网络等待。
+   */
+  const loadAndPlay = async (item: SongItem) => {
+    startLoadingAnimation();
+    try {
+      const prepared = await preparePlay(item as PlaySource, level, loadPreferences(), {
+        preloadResources: item.source !== 'local',
+        onProgress: (progress, detail) => {
+          loadProgress = progress;
+          loadDetail = detail;
+        },
+      });
+      rememberSong(item);
+      setPendingPlay(item.codename, level, prepared);
+      loadProgress = 1;
+      loadDetail = '准备完成';
+      await waitForMinimumLoading();
+      await goto(`/play/${encodeURIComponent(item.codename)}/${level}`);
+    } catch (e) {
+      stopLoadingAnimation();
+      await alertModal(e instanceof Error ? e.message : '谱面加载失败');
+    }
+  };
+
   const startPlay = async () => {
     const s = song();
     if (!s || starting) return;
@@ -331,33 +410,20 @@
           return;
         }
         const file = await fetchPzChartFile(chart.id, token ?? undefined);
-        const item: SongItem = {
+        await loadAndPlay({
           ...s,
-          levels: { ...s.levels, [level]: { chart: file, rank: chart.difficulty || undefined, charter: chart.authorName } },
-        };
-        sessionStorage.setItem('currentSong', JSON.stringify(item));
-        sessionStorage.setItem('currentLevel', level);
-        beginTransition(`/play/${encodeURIComponent(item.codename)}/${level}`);
+          levels: {
+            ...s.levels,
+            [level]: { chart: file, rank: chart.difficulty || undefined, charter: chart.authorName },
+          },
+        });
       } catch (e) {
         await alertModal(e instanceof Error ? e.message : '获取谱面失败');
       }
       return;
     }
-    const lv = s.levels[level];
-    if (!lv?.chart || starting) return;
-    // 预加载谱面资源（写入 HTTP 缓存），不阻塞动画；视频音乐（大文件）不预加载，由流式播放
-    try {
-      const chart = s.source === 'local' ? '' : lv.chart;
-      const targets = [chart, s.illustrationUrl];
-      if (!s.songIsVideo) targets.push(s.songUrl);
-      Promise.all(targets.filter(Boolean).map((url) => fetch(url, { cache: 'force-cache' }).catch(() => null)));
-    } catch {
-      /* 预加载失败不阻塞 */
-    }
-    // 传递当前歌曲数据给 play 页
-    sessionStorage.setItem('currentSong', JSON.stringify(s));
-    sessionStorage.setItem('currentLevel', level);
-    beginTransition(`/play/${encodeURIComponent(s.codename)}/${level}`);
+    if (s.source !== 'local' && !s.levels[level]?.chart) return;
+    await loadAndPlay(s);
   };
 
   const onKey = (e: KeyboardEvent) => {
@@ -590,8 +656,8 @@
       <canvas
         class="loading-canvas"
         bind:this={loadingCanvas}
-        width="520"
-        height="240"
+        width={LOADING_W * LOADING_DPR}
+        height={LOADING_H * LOADING_DPR}
       ></canvas>
     {/if}
 
@@ -1162,12 +1228,22 @@
   /* 右下角 Phigros loading 动画（复刻 ploading.js） */
   .loading-canvas {
     position: absolute;
-    right: 20px;
-    bottom: 20px;
-    width: 260px;
-    height: 120px;
+    right: 22px;
+    bottom: 22px;
+    width: 340px;
+    height: 160px;
     z-index: 80;
     animation: loading-in 0.3s ease;
+  }
+
+  /* 窄屏按比例缩小，避免遮挡歌曲详情 */
+  @media (max-width: 860px) {
+    .loading-canvas {
+      right: 12px;
+      bottom: 12px;
+      width: 250px;
+      height: 118px;
+    }
   }
 
   @keyframes loading-in {
