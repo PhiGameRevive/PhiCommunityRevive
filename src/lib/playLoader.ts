@@ -19,6 +19,17 @@ import {
   songUrl,
   type Level,
 } from '$lib/meta';
+import {
+  isChartArchive,
+  isFont,
+  isImage,
+  isShader,
+  isVideo,
+  parseArchiveDifficulty,
+  resolveChartArchive,
+  unzipArchive,
+  type ResolvedArchive,
+} from '$lib/chartArchive';
 import type { Config, PhiraExtra, Preferences } from '$lib/types';
 import { clamp, inferLevelType } from '$lib/utils';
 
@@ -28,6 +39,8 @@ export interface PlaySourceLevel {
   chart: string;
   rank?: number;
   charter?: string;
+  /** 原始难度名（PhiTogether 的自定义难度，如 "Color"） */
+  levelName?: string;
 }
 
 /** 选歌页的歌曲条目中，准备游玩所需的那部分信息。 */
@@ -321,6 +334,102 @@ const buildOnlineAssets = async (
   return bundle;
 };
 
+/* ---------------- 压缩包谱面（zip / pez） ---------------- */
+
+/**
+ * 引擎的 assetTypes 约定（见 player/scenes/Game.ts 的 preload）：
+ * 0=图片 1=音频 2=视频 3=配置（extra.json / line.csv） 4=shader 5=字体 6=忽略
+ */
+const ASSET_TYPE = {
+  image: 0,
+  audio: 1,
+  video: 2,
+  config: 3,
+  shader: 4,
+  font: 5,
+  ignore: 6,
+} as const;
+
+const MIME_BY_EXT: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.bmp': 'image/bmp',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.m4v': 'video/x-m4v',
+  '.json': 'application/json',
+};
+
+const guessMime = (name: string): string | undefined => {
+  const dot = name.lastIndexOf('.');
+  return dot < 0 ? undefined : MIME_BY_EXT[name.slice(dot).toLowerCase()];
+};
+
+/**
+ * 把压缩包内的条目转成引擎可消费的资源。
+ * 谱面 / 音乐 / 曲绘走 resources 三个固定字段，其余（判定线贴图、BGA、shader、字体、
+ * extra.json、line.csv）进入 assets 列表；asset 名保持包内文件名，谱面与 line.csv
+ * 引用贴图时用的正是文件名。
+ */
+const buildArchiveResources = (
+  archive: ResolvedArchive,
+  preferences: Preferences,
+  track: (url: string) => string,
+): { resources: Config['resources']; songIsVideo: boolean } => {
+  const bundle: AssetBundle = { assetNames: [], assetTypes: [], assets: [] };
+  const toUrl = (name: string): string => {
+    const entry = archive.entries.find((e) => e.name === name)!;
+    const mime = guessMime(name);
+    // Uint8Array 需要拷贝出独立 buffer，fflate 的输出可能共享底层内存
+    const bytes = new Uint8Array(entry.data);
+    return track(URL.createObjectURL(new Blob([bytes], mime ? { type: mime } : undefined)));
+  };
+
+  const consumed = new Set(
+    [archive.chart, archive.music, archive.illustration].filter(Boolean) as string[],
+  );
+
+  for (const entry of archive.entries) {
+    if (consumed.has(entry.name)) continue;
+    let type: number;
+    if (entry.name === archive.extraJson || entry.name === archive.lineCsv)
+      type = ASSET_TYPE.config;
+    else if (isShader(entry.name)) type = ASSET_TYPE.shader;
+    else if (isFont(entry.name)) type = ASSET_TYPE.font;
+    else if (isImage(entry.name)) type = ASSET_TYPE.image;
+    else if (isVideo(entry.name)) {
+      if (!preferences.useVideoBackground) continue;
+      type = ASSET_TYPE.video;
+    } else continue; // info.csv / info.txt / meta.json 等元数据无需交给引擎
+
+    bundle.assetNames.push(entry.name);
+    bundle.assetTypes.push(type);
+    bundle.assets.push(toUrl(entry.name));
+  }
+
+  const songIsVideo = !!archive.music && isVideo(archive.music);
+
+  return {
+    resources: {
+      chart: toUrl(archive.chart),
+      song: archive.music ? toUrl(archive.music) : '',
+      illustration: archive.illustration ? toUrl(archive.illustration) : '/banner.png',
+      ...bundle,
+    },
+    songIsVideo,
+  };
+};
+
 /* ---------------- Config 组装 ---------------- */
 
 const makeConfig = (params: {
@@ -328,8 +437,11 @@ const makeConfig = (params: {
   composer: string;
   charter: string;
   illustrator: string | null;
-  level: Level;
-  levelRanking: number;
+  levelType: Level;
+  /** 难度展示前缀，如 "IN" 或压缩包里的 "Color" */
+  levelName: string;
+  /** 定数；未知时传 null，引擎会只显示难度名 */
+  difficulty: number | null;
   resources: Config['resources'];
   preferences: Preferences;
   songIsVideo: boolean;
@@ -340,9 +452,10 @@ const makeConfig = (params: {
     composer: params.composer,
     charter: params.charter,
     illustrator: params.illustrator,
-    levelType: inferLevelType(params.level.toUpperCase()),
-    level: `${params.level.toUpperCase()} Lv.${params.levelRanking}`,
-    difficulty: params.levelRanking,
+    levelType: inferLevelType(params.levelType.toUpperCase()),
+    // 引擎会自行拼成 `${level}  Lv.${difficulty}`，这里只给难度名，避免出现 "IN Lv.15  Lv.15"
+    level: params.levelName,
+    difficulty: params.difficulty,
   },
   preferences: params.preferences,
   mediaOptions: {
@@ -412,8 +525,9 @@ export const preparePlay = async (
           composer: local.artist,
           charter: 'Local',
           illustrator: null,
-          level,
-          levelRanking: 0,
+          levelType: level,
+          levelName: level.toUpperCase(),
+          difficulty: null,
           resources: { song, chart, illustration: illustration ?? '/banner.png', ...bundle },
           preferences,
           songIsVideo: false,
@@ -424,6 +538,50 @@ export const preparePlay = async (
 
     const lv = source.levels[level];
     if (!lv?.chart) throw new Error(`该曲目没有 ${level.toUpperCase()} 难度谱面`);
+
+    // PhiTogether 等源的部分谱面把整个谱面包（zip / pez）作为 chart 字段：
+    // 下载后在线解压，包内的谱面、音乐、曲绘与附加资源全部转成 blob 交给引擎。
+    if (isChartArchive(lv.chart)) {
+      progress.setDetail('下载谱面包');
+      const archiveBlob = await downloadBlob(lv.chart, '谱面包', progress.task());
+      if (archiveBlob.type.includes('html') || archiveBlob.size === 0) {
+        throw new Error('谱面包无效（服务器返回的不是压缩包）');
+      }
+
+      progress.setDetail('解压谱面包');
+      // 让进度条先渲染出「解压中」，再做同步解压（大包解压会占住主线程）
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const entries = unzipArchive(new Uint8Array(await archiveBlob.arrayBuffer()));
+      const archive = resolveChartArchive(entries, level.toUpperCase());
+      const { resources, songIsVideo } = buildArchiveResources(archive, preferences, track);
+
+      // 包内没有音乐时回落到源列表提供的独立音频（pez 常见：song.mp3 在包外）
+      if (!resources.song) {
+        if (!source.songUrl) throw new Error('谱面包内没有音乐文件');
+        progress.setDetail('下载音乐');
+        const songBlob = await downloadBlob(source.songUrl, '音乐', progress.task());
+        resources.song = track(URL.createObjectURL(songBlob));
+      }
+
+      const levelText = archive.metadata.level ?? lv.levelName ?? level.toUpperCase();
+      progress.done();
+      return {
+        config: makeConfig({
+          title: archive.metadata.name ?? source.name,
+          composer: archive.metadata.composer ?? source.artist,
+          charter: archive.metadata.charter ?? lv.charter ?? 'Unknown',
+          illustrator: archive.metadata.illustrator ?? null,
+          levelType: level,
+          // "IN Lv.15" → "IN"；"Color Lv.?" → "Color"
+          levelName: levelText.replace(/\s*lv\.?.*$/i, '').trim() || level.toUpperCase(),
+          difficulty: parseArchiveDifficulty(levelText) ?? lv.rank ?? null,
+          resources,
+          preferences,
+          songIsVideo,
+        }),
+        release,
+      };
+    }
 
     progress.setDetail('检查附加资源');
     const bundle = await buildOnlineAssets(source, lv.chart, preferences, track);
@@ -462,8 +620,9 @@ export const preparePlay = async (
         composer: source.artist,
         charter: lv.charter ?? 'Unknown',
         illustrator: null,
-        level,
-        levelRanking: lv.rank ?? 0,
+        levelType: level,
+        levelName: lv.levelName ?? level.toUpperCase(),
+        difficulty: lv.rank ?? null,
         resources: { song, chart, illustration, ...bundle },
         preferences,
         songIsVideo: source.songIsVideo === true,

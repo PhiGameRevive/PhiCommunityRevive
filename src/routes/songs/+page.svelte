@@ -28,7 +28,7 @@
     artist: string;
     illustrationUrl: string;
     songUrl: string;
-    levels: Partial<Record<Level, { chart: string; rank?: number; charter?: string }>>;
+    levels: Partial<Record<Level, { chart: string; rank?: number; charter?: string; levelName?: string }>>;
     backgroundAnimation?: string;
     songIsVideo?: boolean;
     local?: LocalChart;
@@ -554,7 +554,7 @@
             <div class="item-levels">
               {#each LEVELS as lv}
                 {#if item.levels[lv]}
-                  <span class="mini-level" class:mini-active={lv === level && i === current}>{LEVEL_LABELS[lv]}</span>
+                  <span class="mini-level" class:mini-active={lv === level && i === current}>{item.levels[lv]?.levelName ?? LEVEL_LABELS[lv]}</span>
                 {/if}
               {/each}
             </div>
@@ -601,7 +601,7 @@
                 tabindex="-1"
                 onclick={() => s.levels[lv] && (level = lv)}
               >
-                <span class="level-txt">{LEVEL_LABELS[lv]}</span>
+                <span class="level-txt">{s.levels[lv]?.levelName ?? LEVEL_LABELS[lv]}</span>
                 {#if s.levels[lv]}
                   <span class="level-rank">Lv.{s.levels[lv]!.rank ?? '?'}</span>
                 {/if}

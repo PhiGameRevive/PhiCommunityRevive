@@ -2,7 +2,15 @@
  * 谱面源抽象：PhiCommunity 官方仓库 / PhiTogether（PTC-pub）等。
  */
 import { chartSource } from './chartSource';
-import { fetchMeta, chartUrl, songUrl, getChartDesigner, getChartFile, getChartRanking, type Level } from './meta';
+import {
+  fetchMeta,
+  chartUrl,
+  songUrl,
+  getChartDesigner,
+  getChartFile,
+  getChartRanking,
+  type Level,
+} from './meta';
 import { fetchPzSongs, PZ_LEVEL_TYPE } from './phizone';
 
 export type ChartSourceId = 'phi' | 'ptc' | 'pz';
@@ -17,6 +25,8 @@ export interface SourceLevel {
   chart: string;
   rank?: number;
   charter?: string;
+  /** 原始难度名。PhiTogether 存在 "Color"、"WEATHER" 等自定义难度，归入 sp 槽位但保留原名展示 */
+  levelName?: string;
 }
 
 export interface SourceSong {
@@ -116,14 +126,22 @@ async function fetchPtcSongs(): Promise<SourceSong[]> {
         seen.add(item.id);
         const levels: SourceSong['levels'] = {};
         for (const c of item.charts ?? []) {
-          const lv = c.level?.toLowerCase() as Level | undefined;
-          if (lv && ['ez', 'hd', 'in', 'at', 'sp'].includes(lv) && c.chart) {
-            levels[lv] = {
-              chart: c.chart,
-              rank: c.difficulty && c.difficulty !== '?' ? Number(c.difficulty) : undefined,
-              charter: c.charter,
-            };
-          }
+          if (!c.chart) continue;
+          const raw = c.level?.trim() ?? '';
+          const lower = raw.toLowerCase() as Level;
+          // 标准难度直接归位；"Color"、"WEATHER" 等自定义难度占用 sp 槽位并保留原名
+          const lv: Level | undefined = (['ez', 'hd', 'in', 'at', 'sp'] as Level[]).includes(lower)
+            ? lower
+            : raw
+              ? 'sp'
+              : undefined;
+          if (!lv || levels[lv]) continue;
+          levels[lv] = {
+            chart: c.chart,
+            rank: c.difficulty && c.difficulty !== '?' ? Number(c.difficulty) : undefined,
+            charter: c.charter,
+            levelName: raw || undefined,
+          };
         }
         const songIsVideo = /\.(mp4|webm|mov|m4v)$/i.test(item.song ?? '');
         songs.push({
