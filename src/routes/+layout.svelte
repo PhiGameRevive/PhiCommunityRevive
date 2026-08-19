@@ -1,11 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { page } from '$app/state';
   import '../app.css';
   import Modal from '$lib/Modal.svelte';
 
   let isMobile = false;
   let portrait = false;
   let isFullscreen = false;
+  // 根路径是开场动画页：竖屏旋转遮罩会盖住开场流程，等进选歌页再提示
+  const isIntro = () => page.url.pathname === '/';
 
   const check = () => {
     isMobile =
@@ -50,8 +53,8 @@
   });
 </script>
 
-<!-- 手机竖屏：强制横屏提示 -->
-{#if isMobile && portrait}
+<!-- 手机竖屏：强制横屏提示（开场页除外） -->
+{#if isMobile && portrait && !isIntro()}
   <div class="rotate-overlay">
     <div class="rotate-icon"></div>
     <p class="rotate-title">请横屏游玩</p>

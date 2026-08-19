@@ -9,6 +9,9 @@
   import { alert as alertModal, prompt as pzPrompt } from '$lib/modal';
   import { loadPreferences } from '$lib/preferences';
   import { preparePlay, setPendingPlay, type PlaySource } from '$lib/playLoader';
+  import { takePreloadedSongLists } from '$lib/preload';
+  import PhigrosLoading from '$lib/components/PhigrosLoading.svelte';
+  import { randomTip } from '$lib/loadingTips';
 
   const LEVELS: Level[] = ['ez', 'hd', 'in', 'at', 'sp'];
   const LEVEL_LABELS: Record<Level, string> = {
@@ -29,6 +32,8 @@
     illustrationUrl: string;
     songUrl: string;
     levels: Partial<Record<Level, { chart: string; rank?: number; charter?: string; levelName?: string }>>;
+    /** PhiZone 源：具体谱面（chart）id，用于拉取附加资源 */
+    chartId?: string;
     backgroundAnimation?: string;
     songIsVideo?: boolean;
     local?: LocalChart;
@@ -52,6 +57,30 @@
   let showOverview = false;
   let loadProgress = 0;
   let loadDetail = '';
+
+  // ---- 搜索 ----
+  let query = '';
+  const onSearchInput = () => {
+    current = 0;
+    const first = currentList()[0];
+    if (first) {
+      const lp = LEVELS.find((l) => first.levels[l]);
+      if (lp) level = lp;
+    }
+  };
+  const clearSearch = () => {
+    query = '';
+    onSearchInput();
+  };
+
+  // ---- 进入页面时的全屏加载界面（开场/结算/设置/中途退出回到选歌页时统一展示）----
+  const MIN_PAGE_LOADING_MS = 700;
+  let pageLoadingStart = 0;
+  let pageProgress = 0;
+  let pageProgressTimer = 0;
+  let pageTip = '';
+  let pageCover = '/ui/ElementSqare.webp';
+  let pageReveal = false; // 加载界面淡出完成，才允许移除浮层
 
   // ---- Phigros loading 动画（复刻 ploading.js）----
   // 以逻辑像素绘制，backing store 放大 LOADING_DPR 倍保证文字锐利
@@ -136,8 +165,18 @@
     }
   };
 
-  const currentList = (): SongItem[] =>
-    activeSource === 'local' ? localSongs : songsBySource[activeSource];
+  /** 当前源歌曲列表（应用搜索过滤：歌名 / 艺术家 / 谱师 / id，空格分隔的多个词需全部命中） */
+  const currentList = (): SongItem[] => {
+    const list = activeSource === 'local' ? localSongs : songsBySource[activeSource];
+    const q = query.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((s) => {
+      const haystack = [s.name, s.artist, s.id ?? '', ...Object.values(s.levels).map((l) => l?.charter ?? '')]
+        .join(' ')
+        .toLowerCase();
+      return q.split(/\s+/).every((part) => haystack.includes(part));
+    });
+  };
 
   const song = () => currentList()[current] ?? null;
   const chartFile = () => {
@@ -184,23 +223,33 @@
   onMount(async () => {
     playerName = localStorage.getItem('playerName') ?? 'GUEST';
     pzLoggedIn = !!getToken();
+    // 进入页面即展示加载界面：进度条随经过时间推进，数据就绪后走满
+    pageLoadingStart = performance.now();
+    pageTip = randomTip();
+    pageProgressTimer = window.setInterval(() => {
+      pageProgress = Math.min((performance.now() - pageLoadingStart) / MIN_PAGE_LOADING_MS, 0.9);
+    }, 60);
     try {
-      const [phi, ptc, pz, locals] = await Promise.all([
-        fetchSongs('phi').catch((e) => {
-          console.error('phi source failed', e);
-          return [];
-        }),
-        fetchSongs('ptc').catch((e) => {
-          console.error('ptc source failed', e);
-          return [];
-        }),
-        fetchSongs('pz').catch((e) => {
-          console.error('pz source failed', e);
-          pzSourceError = e instanceof Error ? e.message : String(e);
-          return [];
-        }),
-        getAllLocalCharts(),
-      ]);
+      // 开场动画期间已预载三个谱面源列表，命中则直接使用（跳过重复的网络请求）
+      const pre = takePreloadedSongLists();
+      const [phi, ptc, pz, locals] = pre
+        ? [pre.phi, pre.ptc, pre.pz, await getAllLocalCharts()]
+        : await Promise.all([
+            fetchSongs('phi').catch((e) => {
+              console.error('phi source failed', e);
+              return [];
+            }),
+            fetchSongs('ptc').catch((e) => {
+              console.error('ptc source failed', e);
+              return [];
+            }),
+            fetchSongs('pz').catch((e) => {
+              console.error('pz source failed', e);
+              pzSourceError = e instanceof Error ? e.message : String(e);
+              return [];
+            }),
+            getAllLocalCharts(),
+          ]);
       songsBySource.phi = phi.map((s) => ({
         codename: `phi-${s.id}`,
         source: 'phi',
@@ -235,12 +284,15 @@
       }));
       localSongs = locals.map(localToItem);
 
-      // 成绩
+      // 成绩（兼容旧项目：历史记录以无源前缀的原始 codename 为 key，未命中时回退）
       const allSongs = [...localSongs, ...songsBySource.phi, ...songsBySource.ptc, ...songsBySource.pz];
       const scoreEntries = await Promise.all(
         allSongs.flatMap((s) =>
           LEVELS.map(async (l) => {
-            const r = await getResult(`${s.codename}-${l}`);
+            const rawId = s.codename.replace(/^(phi|ptc|pz)-/, '');
+            const r =
+              (await getResult(`${s.codename}-${l}`)) ??
+              (rawId !== s.codename ? await getResult(`${rawId}-${l}`) : undefined);
             return [r ? `${s.codename}-${l}` : '', r ? { score: r.score, accuracy: r.accuracy } : null] as const;
           }),
         ),
@@ -263,6 +315,19 @@
       loaded = true;
     }
 
+    // 加载界面收尾：进度走满，随机挑一首已加载歌曲的曲绘，随后淡出展示选歌 UI
+    clearInterval(pageProgressTimer);
+    pageProgress = 1;
+    const all = [...localSongs, ...songsBySource.phi, ...songsBySource.ptc, ...songsBySource.pz].filter(
+      (s) => s.illustrationUrl,
+    );
+    if (all.length > 0) {
+      pageCover = all[Math.floor(Math.random() * all.length)].illustrationUrl;
+    }
+    window.setTimeout(() => {
+      pageReveal = true;
+    }, 500);
+
     // 全局监听拖拽移动/释放（指针离开列表项后仍能跟随）
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
@@ -271,6 +336,7 @@
 
   onDestroy(() => {
     cancelAnimationFrame(animId);
+    clearInterval(pageProgressTimer);
     window.removeEventListener('pointermove', onPointerMove);
     window.removeEventListener('pointerup', onPointerUp);
     window.removeEventListener('pointercancel', onPointerUp);
@@ -404,7 +470,8 @@
       try {
         if (!s.id) throw new Error('无效的 PhiZone 谱面');
         const charts = await fetchPzCharts(s.id);
-        const chart = charts.find((c) => PZ_LEVEL_TYPE[c.levelType] === level);
+        // levelType 0-4 为标准难度；5+（如 WE 等）与选歌列表一致归入 sp 槽位
+        const chart = charts.find((c) => (PZ_LEVEL_TYPE[c.levelType] ?? 'sp') === level);
         if (!chart) {
           await alertModal('该难度没有谱面');
           return;
@@ -412,9 +479,16 @@
         const file = await fetchPzChartFile(chart.id, token ?? undefined);
         await loadAndPlay({
           ...s,
+          // 附加资源（贴图/音效/shader）由 playLoader 按 chartId 拉取；levelName 展示真实难度名
+          chartId: chart.id,
           levels: {
             ...s.levels,
-            [level]: { chart: file, rank: chart.difficulty || undefined, charter: chart.authorName },
+            [level]: {
+              chart: file,
+              rank: chart.difficulty || undefined,
+              charter: chart.authorName,
+              levelName: chart.level,
+            },
           },
         });
       } catch (e) {
@@ -428,6 +502,8 @@
 
   const onKey = (e: KeyboardEvent) => {
     if (starting) return;
+    // 搜索框内输入时不响应选歌快捷键（Enter/空格会误触开始）
+    if ((e.target as HTMLElement | null)?.tagName === 'INPUT') return;
     if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') selectSong((current - 1 + currentList().length) % currentList().length);
     if (e.key === 'ArrowDown' || e.key === 'ArrowRight') selectSong((current + 1) % currentList().length);
     if (e.key === 'Enter' || e.key === ' ') startPlay();
@@ -437,6 +513,13 @@
 <svelte:head>
   <title>选歌 - PhiCommunity</title>
 </svelte:head>
+
+<!-- 全屏加载界面：数据拉取中显示，就绪后进度走满并淡出（结算/设置/中途退出回到本页同样展示） -->
+{#if !pageReveal && !error}
+  <div class="page-loading-mask" class:leaving={loaded}>
+    <PhigrosLoading cover={pageCover} tip={pageTip} progress={loaded ? 1 : pageProgress} />
+  </div>
+{/if}
 
 {#if !loaded && !error}
   <!-- 骨架屏 -->
@@ -538,6 +621,18 @@
     <div class="body">
       <!-- 左侧歌曲列表（开始动画时收起；可拖拽到中间选定） -->
       <div class="song-list" class:list-hidden={starting}>
+        <div class="song-search">
+          <input
+            class="search-input"
+            type="text"
+            placeholder="搜索歌曲 / 艺术家 / 谱师…"
+            bind:value={query}
+            oninput={onSearchInput}
+          />
+          {#if query}
+            <button class="search-clear" onclick={clearSearch} aria-label="清除搜索"></button>
+          {/if}
+        </div>
         {#each currentList() as item, i}
           <button
             class="song-item"
@@ -562,6 +657,8 @@
         {:else}
           {#if activeSource === 'pz' && pzSourceError}
             <p class="empty-hint">PhiZone 列表加载失败：{pzSourceError}</p>
+          {:else if query.trim()}
+            <p class="empty-hint">没有匹配「{query.trim()}」的谱面</p>
           {:else}
             <p class="empty-hint">该来源暂无谱面</p>
           {/if}
@@ -895,6 +992,81 @@
     opacity: 0;
     border-right-color: transparent;
     overflow: hidden;
+  }
+
+  /* 搜索框：吸附在列表顶部，随列表一起收起 */
+  .song-search {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 2px 10px;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: linear-gradient(180deg, rgba(8, 8, 12, 0.92) 0%, rgba(8, 8, 12, 0.86) 65%, transparent 100%);
+    backdrop-filter: blur(6px);
+  }
+
+  .search-input {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #fff;
+    font-size: 0.85rem;
+    outline: none;
+    transition:
+      border-color 0.2s ease,
+      background 0.2s ease;
+  }
+
+  .search-input::placeholder {
+    color: rgba(255, 255, 255, 0.4);
+  }
+
+  .search-input:focus {
+    border-color: rgba(255, 255, 255, 0.6);
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .search-clear {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 2px;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.6);
+    cursor: pointer;
+    position: relative;
+  }
+
+  .search-clear::before,
+  .search-clear::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 12px;
+    height: 2px;
+    background: currentColor;
+  }
+
+  .search-clear::before {
+    transform: translate(-50%, -50%) rotate(45deg);
+  }
+
+  .search-clear::after {
+    transform: translate(-50%, -50%) rotate(-45deg);
+  }
+
+  .search-clear:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
   }
 
   .song-item {
@@ -1255,6 +1427,19 @@
       opacity: 1;
       transform: scale(1);
     }
+  }
+
+  /* ---- 进入页面时的全屏加载界面浮层（盖过选歌 UI，数据就绪后淡出）---- */
+  .page-loading-mask {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    transition: opacity 0.5s ease;
+  }
+
+  .page-loading-mask.leaving {
+    opacity: 0;
+    pointer-events: none;
   }
 
   /* 通用淡出（顶栏等） */

@@ -39,6 +39,15 @@ export interface PzChart {
   authorName: string;
 }
 
+/** PhiZone 谱面附加资源（判定线贴图 / 打击音效 / shader 等；与 Phigros 资产类型一致） */
+export interface PzAsset {
+  id: string;
+  /** 0=image 1=audio 2=video 3=json 4=shader 5=font */
+  type: number;
+  name: string;
+  file: string;
+}
+
 async function api(path: string, token?: string): Promise<any> {
   const headers: Record<string, string> = {
     'User-Agent': 'PhiZoneRegularAccess',
@@ -90,10 +99,12 @@ export async function fetchPzSongs(): Promise<PzSong[]> {
   const pushSong = (s: PzSong) => {
     if (!s.isHidden && !s.isLocked) songs.push(s);
   };
+  // /songs/ 的响应为 { total, perPage, ..., data: [...] }：数组直接在 data 下
   const first = await api('/songs/?PerPage=32&Page=1').catch(() => null);
-  if (!first?.data?.data) return songs;
-  first.data.data.forEach(pushSong);
-  const total = first.data.total ?? 0;
+  const firstPage = Array.isArray(first?.data) ? (first.data as PzSong[]) : [];
+  if (firstPage.length === 0) return songs;
+  firstPage.forEach(pushSong);
+  const total = (first?.total as number) ?? firstPage.length;
   const totalPages = Math.min(20, Math.ceil(total / 32) || 1);
   const rest = await Promise.all(
     Array.from({ length: totalPages - 1 }, (_, i) =>
@@ -101,7 +112,7 @@ export async function fetchPzSongs(): Promise<PzSong[]> {
     ),
   );
   for (const json of rest) {
-    json?.data?.data?.forEach(pushSong);
+    if (Array.isArray(json?.data)) (json.data as PzSong[]).forEach(pushSong);
   }
   return songs;
 }
@@ -121,4 +132,16 @@ export async function fetchPzChartFile(chartId: string, token?: string): Promise
   const chart = (json.data ?? json) as PzChart;
   if (!chart.file) throw new Error('PhiZone 谱面文件不可用（可能需要账号权限）');
   return chart.file as string;
+}
+
+/**
+ * 拉取谱面附加资源列表（公开接口；返回的资源 URL 可直接下载）。
+ * 谱面 JSON 里按文件名引用这些资源（判定线贴图、打击音效、shader 等），
+ * 需要一并下载并交给引擎才能完整渲染。
+ */
+export async function fetchPzChartAssets(chartId: string): Promise<PzAsset[]> {
+  const json = await api(`/charts/${chartId}/assets`).catch(() => null);
+  const data = json?.data;
+  if (!Array.isArray(data)) return [];
+  return (data as PzAsset[]).filter((a) => a?.name && a?.file);
 }

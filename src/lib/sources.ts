@@ -169,10 +169,11 @@ async function fetchPzSongsSource(): Promise<SourceSong[]> {
   return list.map((s) => {
     const levels: SourceSong['levels'] = {};
     for (const cl of s.chartLevels ?? []) {
-      const lv = PZ_LEVEL_TYPE[cl.levelType];
-      if (lv && cl.count > 0) {
-        levels[lv] = { chart: '', rank: undefined, charter: undefined };
-      }
+      if (cl.count <= 0) continue;
+      // 标准难度 0-4 直接归位；PZ 后续新增的难度类型（如 WE 等）占用 sp 槽位（保留原名展示）
+      const lv = PZ_LEVEL_TYPE[cl.levelType] ?? 'sp';
+      if (levels[lv]) continue;
+      levels[lv] = { chart: '', rank: undefined, charter: undefined };
     }
     return {
       id: s.id,

@@ -12,8 +12,10 @@
     preparePlay,
     resolvePlaySource,
     takePendingPlay,
+    type PlaySource,
     type PreparedPlay,
   } from '$lib/playLoader';
+  import { parseSongId } from '$lib/sources';
   import { getLocalChart, LOCAL_PREFIX } from '$lib/db';
 
   const codename = page.params.codename ?? '';
@@ -74,6 +76,19 @@
       }));
       return;
     }
+    // 在线谱面的歌曲数据：优先取选歌页写入 sessionStorage 的条目（含定数），
+    // 避免用带源前缀的 codename（phi-xxx / ptc-xxx / pz-xxx）去请求不存在的 meta.json
+    const readCachedSong = (): PlaySource | null => {
+      try {
+        const raw = sessionStorage.getItem('currentSong');
+        if (!raw) return null;
+        const item = JSON.parse(raw) as PlaySource;
+        return item?.codename === codename ? item : null;
+      } catch {
+        return null;
+      }
+    };
+
     // 本地谱面成绩记录（定数为 0，RKS 不产生）
     const recordMeta = async (): Promise<ChartMeta> => {
       if (isLocal) {
@@ -87,7 +102,27 @@
           chartDesigner: 'Local',
         };
       }
-      return fetchMeta(codename);
+      // 外链/刷新直接进入 phi 谱面且无缓存：meta.json 在原始 codename 下
+      const rawId = codename.replace(/^(phi|ptc|pz)-/, '');
+      const cached = readCachedSong();
+      if (!cached && parseSongId(codename)?.source === 'phi') {
+        const meta = await fetchMeta(rawId);
+        return { ...meta, codename };
+      }
+      const meta: ChartMeta = {
+        codename,
+        name: cached?.name ?? codename,
+        artist: cached?.artist ?? 'Unknown',
+        illustration: cached?.illustrationUrl ?? '',
+        musicFile: cached?.songUrl ?? '',
+        chartDesigner: cached?.levels?.[level]?.charter ?? 'Unknown',
+      };
+      // 定数（RKS 计算用）；sp 槽位无定数概念
+      const rank = cached?.levels?.[level]?.rank;
+      if (rank != null && level !== 'sp') {
+        (meta as unknown as Record<string, unknown>)[`${level}Ranking`] = rank;
+      }
+      return meta;
     };
     recordMeta()
       .then(async (meta) => {

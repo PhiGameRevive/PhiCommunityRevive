@@ -30,6 +30,7 @@ import {
   unzipArchive,
   type ResolvedArchive,
 } from '$lib/chartArchive';
+import { fetchPzChartAssets } from '$lib/phizone';
 import type { Config, PhiraExtra, Preferences } from '$lib/types';
 import { clamp, inferLevelType } from '$lib/utils';
 
@@ -47,6 +48,8 @@ export interface PlaySourceLevel {
 export interface PlaySource {
   source: PlaySourceKind;
   codename: string;
+  /** PhiZone 源：具体谱面（chart）的 id，用于拉取附加资源 */
+  chartId?: string;
   name: string;
   artist: string;
   illustrationUrl: string;
@@ -328,6 +331,31 @@ const buildOnlineAssets = async (
         pushSyntheticBga(bundle, videoUrl, videoAlpha, track);
         break;
       }
+    }
+  }
+
+  // PhiZone 谱面：附加资源（判定线贴图 / 打击音效 / shader 等）按文件名被谱面引用，
+  // 必须一并交给引擎（资源 URL 直连，与 extra.json / BGA 一致走流式加载）
+  if (source.source === 'pz' && source.chartId) {
+    const pzAssets = await fetchPzChartAssets(source.chartId);
+    for (const a of pzAssets) {
+      if (bundle.assetNames.includes(a.name)) continue;
+      const type =
+        a.type >= 0 && a.type <= 5
+          ? a.type
+          : isShader(a.name)
+            ? ASSET_TYPE.shader
+            : isFont(a.name)
+              ? ASSET_TYPE.font
+              : isImage(a.name)
+                ? ASSET_TYPE.image
+                : isVideo(a.name)
+                  ? ASSET_TYPE.video
+                  : ASSET_TYPE.ignore;
+      if (type === ASSET_TYPE.ignore) continue;
+      bundle.assetNames.push(a.name);
+      bundle.assetTypes.push(type);
+      bundle.assets.push(a.file);
     }
   }
 
