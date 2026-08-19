@@ -110,7 +110,7 @@ export class Game extends Scene {
     repeat?: number;
   }[] = [];
   private _audioAssets: { key: string; url: string }[] = [];
-  private _shaderAssets: { key: string; url: string; source?: string }[] = [];
+  private _shaderAssets: { key: string; url: string; source?: string; fallback?: boolean }[] = [];
   private _skinSize: number | undefined = undefined;
 
   private _title: string | null;
@@ -357,6 +357,16 @@ export class Game extends Scene {
         this._extra.effects?.forEach((effect) => {
           if (effect.shader.startsWith('/')) {
             effect.shader = `asset-${effect.shader.slice(1)}`;
+            // 外置 shader 未随谱面打包时，回退到随包发布的内置同名 shader
+            // （如 Phigrim 谱面的 image_noise_pr.glsl，与内置 noise.glsl 同为屏幕噪点效果）
+            if (!this._shaderAssets.some((a) => a.key === effect.shader)) {
+              const shaderName = effect.shader.slice(6).replace(/\.glsl$/, '');
+              this._shaderAssets.push({
+                key: effect.shader,
+                url: base + '/game/shaders/' + shaderName + '.glsl',
+                fallback: true,
+              });
+            }
           } else {
             // 谱面可能已带 .glsl 后缀，避免拼成 chromatic.glsl.glsl
             const shaderName = effect.shader.endsWith('.glsl')
@@ -372,7 +382,20 @@ export class Game extends Scene {
         await Promise.all(
           this._shaderAssets.map(async (asset) => {
             console.log('Loading shader: ', asset.url);
-            asset.source = await loadText(asset.url, asset.key);
+            if (asset.fallback) {
+              // 内置回退必须真的存在才启用（download/loadText 不校验 HTTP 状态，404 会拿到 HTML 页面）
+              try {
+                const res = await fetch(asset.url);
+                if (res.ok) asset.source = await res.text();
+              } catch {
+                /* 忽略：未发布同名内置 shader */
+              }
+              if (!asset.source) {
+                console.warn(`内置 shader ${asset.key.slice(6)} 不可用，该特效将被跳过`);
+              }
+            } else {
+              asset.source = await loadText(asset.url, asset.key);
+            }
           }),
         );
       }
@@ -901,10 +924,11 @@ export class Game extends Scene {
     const missing: string[] = [];
     this._shaders = this._extra.effects?.map((effect, i) => {
       const asset = this._shaderAssets.find((asset) => asset.key === effect.shader);
-      if (!asset) {
+      // 缺失或回退加载失败：不阻塞游玩，跳过该特效并仅记录警告
+      if (!asset || !asset.source) {
         if (!missing.includes(effect.shader)) {
           missing.push(effect.shader);
-          alert(m.error_shader_not_found({ name: effect.shader.slice(6) }));
+          console.warn(m.error_shader_not_found({ name: effect.shader.slice(6) }));
         }
         return undefined;
       }

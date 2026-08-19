@@ -229,7 +229,11 @@ const localBlobUrl = (
   return file ? track(URL.createObjectURL(file.blob)) : undefined;
 };
 
-/** 本地谱面的附加资源（extra.json 及其引用的视频文件）。 */
+/** 本地谱面的附加资源：遍历包内全部文件，把谱面/音乐/曲绘之外的故事板素材
+ *  （判定线贴图、立绘、shader、字体、视频、extra.json、line.csv）按类型交给引擎。
+ *  谱面 JSON 的 judgeLine.Texture / note.hitsound、extra.json 的 videos 与 shader
+ *  均按文件名引用这些资源，缺一个就会静默回退默认贴图或跳过特效（故事板不显示）。
+ *  与在线谱面包的 buildArchiveResources 对齐。 */
 const buildLocalAssets = (
   local: LocalChart,
   useVideoBg: boolean,
@@ -237,35 +241,33 @@ const buildLocalAssets = (
   track: (url: string) => string,
 ): AssetBundle => {
   const bundle: AssetBundle = { assetNames: [], assetTypes: [], assets: [] };
+  const consumed = new Set(
+    [local.musicFile, local.illustration, ...Object.values(local.chartFiles)].filter(
+      Boolean,
+    ) as string[],
+  );
 
-  if (local.extraJson) {
-    const blobUrl = track(
-      URL.createObjectURL(new Blob([local.extraJson], { type: 'application/json' })),
-    );
-    bundle.assetNames.push('extra.json');
-    bundle.assetTypes.push(3);
-    bundle.assets.push(blobUrl);
+  for (const file of local.files) {
+    if (consumed.has(file.name)) continue;
+    let type: number;
+    if (file.name === 'extra.json' || file.name === 'line.csv') type = ASSET_TYPE.config;
+    else if (isShader(file.name)) type = ASSET_TYPE.shader;
+    else if (isFont(file.name)) type = ASSET_TYPE.font;
+    else if (isImage(file.name)) type = ASSET_TYPE.image;
+    else if (isVideo(file.name)) {
+      // 有真实 extra.json 时视频作为 asset 供 videos[].path（asset- 前缀）引用；
+      // 无 extra.json 时由下方 pushSyntheticBga 以 URL 直连播放，这里跳过避免重复加载
+      if (!local.extraJson || !useVideoBg) continue;
+      type = ASSET_TYPE.video;
+    } else continue; // info.txt / info.yml / meta.json 等元数据无需交给引擎
 
-    if (useVideoBg) {
-      try {
-        const extra = JSON.parse(local.extraJson) as PhiraExtra;
-        extra.videos?.forEach((v) => {
-          const url = localBlobUrl(local, v.path, track);
-          if (url && !bundle.assetNames.includes(v.path)) {
-            bundle.assetNames.push(v.path);
-            bundle.assetTypes.push(2);
-            bundle.assets.push(url);
-          }
-        });
-      } catch {
-        /* 忽略解析失败 */
-      }
-    }
-    return bundle;
+    bundle.assetNames.push(file.name);
+    bundle.assetTypes.push(type);
+    bundle.assets.push(track(URL.createObjectURL(file.blob)));
   }
 
-  // 带视频文件但没有 extra.json → 用第一个视频作为 BGA
-  if (useVideoBg) {
+  // 带视频文件但没有 extra.json → 用第一个视频作为 BGA（整曲播放）
+  if (useVideoBg && !local.extraJson) {
     const video = local.files.find((f) => /\.(mp4|webm|mov)$/i.test(f.name));
     if (video) {
       pushSyntheticBga(bundle, track(URL.createObjectURL(video.blob)), videoAlpha, track);
