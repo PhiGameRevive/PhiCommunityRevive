@@ -45,6 +45,9 @@ export const takePreloadedSongLists = (): PreloadedSongLists | null => {
   return result;
 };
 
+/** 只读查看预载结果（不取走）。选歌页进入加载界面时可立即用其随机选封面。 */
+export const peekPreloadedSongLists = (): PreloadedSongLists | null => lists;
+
 /**
  * 后台预热 Phaser 引擎包。模块导入本身无副作用（game 实例由 start() 按需创建）。
  * 幂等：同一时刻只预热一次。

@@ -9,7 +9,7 @@
   import { alert as alertModal, prompt as pzPrompt } from '$lib/modal';
   import { loadPreferences } from '$lib/preferences';
   import { preparePlay, setPendingPlay, type PlaySource } from '$lib/playLoader';
-  import { takePreloadedSongLists } from '$lib/preload';
+  import { takePreloadedSongLists, peekPreloadedSongLists } from '$lib/preload';
   import PhigrosLoading from '$lib/components/PhigrosLoading.svelte';
   import { randomTip } from '$lib/loadingTips';
 
@@ -81,6 +81,32 @@
   let pageTip = '';
   let pageCover = '/ui/ElementSqare.webp';
   let pageReveal = false; // 加载界面淡出完成，才允许移除浮层
+
+  // ---- 加载界面封面池：直接访问/刷新时也能立即随机显示歌曲封面 ----
+  const COVER_POOL_KEY = 'songCoverPool';
+  let coverPool: string[] = [];
+  const pickCover = () => {
+    if (coverPool.length > 0) {
+      pageCover = coverPool[Math.floor(Math.random() * coverPool.length)];
+    }
+  };
+  const saveCoverPool = (urls: string[]) => {
+    try {
+      localStorage.setItem(COVER_POOL_KEY, JSON.stringify(urls));
+    } catch {
+      /* 配额/隐私模式等忽略 */
+    }
+  };
+  const loadCoverPool = (): string[] => {
+    try {
+      const cached = localStorage.getItem(COVER_POOL_KEY);
+      if (!cached) return [];
+      const arr = JSON.parse(cached) as unknown;
+      return Array.isArray(arr) ? arr.filter((u): u is string => typeof u === 'string') : [];
+    } catch {
+      return [];
+    }
+  };
 
   // ---- Phigros loading 动画（复刻 ploading.js）----
   // 以逻辑像素绘制，backing store 放大 LOADING_DPR 倍保证文字锐利
@@ -223,6 +249,17 @@
   onMount(async () => {
     playerName = localStorage.getItem('playerName') ?? 'GUEST';
     pzLoggedIn = !!getToken();
+    // 进入加载界面即随机选一张歌曲封面并固定显示（与开场页一致，不轮播）：
+    // 优先用开场页预载的列表，直接访问/刷新时用上次缓存的封面池
+    coverPool = loadCoverPool();
+    const peek = peekPreloadedSongLists();
+    if (peek) {
+      const peekUrls = [...peek.phi, ...peek.ptc, ...peek.pz]
+        .map((s) => s.illustration)
+        .filter((u): u is string => Boolean(u));
+      if (peekUrls.length > 0) coverPool = peekUrls;
+    }
+    pickCover();
     // 进入页面即展示加载界面：进度条随经过时间推进，数据就绪后走满
     pageLoadingStart = performance.now();
     pageTip = randomTip();
@@ -315,14 +352,19 @@
       loaded = true;
     }
 
-    // 加载界面收尾：进度走满，随机挑一首已加载歌曲的曲绘，随后淡出展示选歌 UI
+    // 加载界面收尾：进度走满，更新封面池（供下次直接访问/刷新时立即随机）。
+    // 封面保持进入时随机的那张不动；仅首次冷启动（无缓存池无预载）时补随机一张
     clearInterval(pageProgressTimer);
     pageProgress = 1;
     const all = [...localSongs, ...songsBySource.phi, ...songsBySource.ptc, ...songsBySource.pz].filter(
       (s) => s.illustrationUrl,
     );
-    if (all.length > 0) {
-      pageCover = all[Math.floor(Math.random() * all.length)].illustrationUrl;
+    const urls = all.map((s) => s.illustrationUrl);
+    if (urls.length > 0) {
+      coverPool = urls;
+      // 本地谱面封面是 blob URL，跨刷新失效，只缓存远程 URL
+      saveCoverPool(urls.filter((u) => !u.startsWith('blob:')));
+      if (pageCover === '/ui/ElementSqare.webp') pickCover();
     }
     window.setTimeout(() => {
       pageReveal = true;
