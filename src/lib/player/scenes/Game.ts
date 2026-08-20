@@ -430,7 +430,7 @@ export class Game extends Scene {
         await this.initializeVideos();
         this.sortObjects();
         if (this._autostart) {
-          this.start();
+          void this.start();
         } else {
           this._status = GameStatus.READY;
         }
@@ -487,13 +487,27 @@ export class Game extends Scene {
     this._videos?.forEach((video) => video.destroy());
   }
 
-  start() {
-    if (this._status === GameStatus.ERROR) return;
+  async start(): Promise<boolean> {
+    if (this._status === GameStatus.ERROR) return false;
     this.in();
-    if (!this._render)
-      this._timeout = setTimeout(() => {
-        this._clock.play();
-      }, 1000 / this.tweens.timeScale);
+    try {
+      // 浏览器可能要求用户手势才能恢复 WebAudio；原生 HTMLAudio 的 play()
+      // 也会在无痕/移动浏览器中返回 rejected Promise。
+      const context = (this.sound as unknown as { context?: AudioContext }).context;
+      if (context?.state === 'suspended') await context.resume();
+      if (!this._render) {
+        await new Promise<void>((resolve, reject) => {
+          this._timeout = setTimeout(() => {
+            this._clock.play().then(resolve).catch(reject);
+          }, 1000 / this.tweens.timeScale);
+        });
+      }
+    } catch (error) {
+      clearTimeout(this._timeout);
+      this._status = GameStatus.READY;
+      EventBus.emit('audio-blocked', error);
+      return false;
+    }
     this._status = GameStatus.PLAYING;
     this.updateChart(this.beat, this.timeSec, Date.now());
     EventBus.emit('started');
@@ -513,6 +527,7 @@ export class Game extends Scene {
     this._song.on('complete', () => {
       this.end();
     });
+    return true;
   }
 
   pause(emittedBySpace: boolean = false) {
@@ -528,6 +543,7 @@ export class Game extends Scene {
         name: 'paused',
       },
     });
+    return true;
   }
 
   resume() {

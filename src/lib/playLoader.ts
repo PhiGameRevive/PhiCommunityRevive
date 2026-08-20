@@ -31,6 +31,7 @@ import {
   type ResolvedArchive,
 } from '$lib/chartArchive';
 import { fetchPzChartAssets } from '$lib/phizone';
+import { fetchSongs, type ChartSourceId } from '$lib/sources';
 import type { Config, PhiraExtra, Preferences } from '$lib/types';
 import { clamp, inferLevelType } from '$lib/utils';
 
@@ -69,6 +70,8 @@ export interface PrepareOptions {
   /** 是否把谱面/曲绘/音频下载为 blob（选歌页预加载时为 true）。 */
   preloadResources?: boolean;
   onProgress?: (progress: number, detail: string) => void;
+  /** 取消当前资源准备，供选歌页的取消按钮使用。 */
+  signal?: AbortSignal;
 }
 
 /* ---------------- 下载与进度 ---------------- */
@@ -128,8 +131,13 @@ const createProgress = (onProgress?: PrepareOptions['onProgress']) => {
 };
 
 /** 流式下载为 Blob，并向进度任务汇报字节数。 */
-const downloadBlob = async (url: string, label: string, task?: ProgressTask): Promise<Blob> => {
-  const res = await fetch(url);
+const downloadBlob = async (
+  url: string,
+  label: string,
+  task?: ProgressTask,
+  signal?: AbortSignal,
+): Promise<Blob> => {
+  const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`${label}下载失败（HTTP ${res.status}）`);
   const contentType = res.headers.get('content-type') ?? '';
   const total = Number.parseInt(res.headers.get('content-length') ?? '') || 0;
@@ -573,7 +581,7 @@ export const preparePlay = async (
     // 下载后在线解压，包内的谱面、音乐、曲绘与附加资源全部转成 blob 交给引擎。
     if (isChartArchive(lv.chart)) {
       progress.setDetail('下载谱面包');
-      const archiveBlob = await downloadBlob(lv.chart, '谱面包', progress.task());
+      const archiveBlob = await downloadBlob(lv.chart, '谱面包', progress.task(), options.signal);
       if (archiveBlob.type.includes('html') || archiveBlob.size === 0) {
         throw new Error('谱面包无效（服务器返回的不是压缩包）');
       }
@@ -589,7 +597,7 @@ export const preparePlay = async (
       if (!resources.song) {
         if (!source.songUrl) throw new Error('谱面包内没有音乐文件');
         progress.setDetail('下载音乐');
-        const songBlob = await downloadBlob(source.songUrl, '音乐', progress.task());
+        const songBlob = await downloadBlob(source.songUrl, '音乐', progress.task(), options.signal);
         resources.song = track(URL.createObjectURL(songBlob));
       }
 
@@ -613,9 +621,6 @@ export const preparePlay = async (
       };
     }
 
-    progress.setDetail('检查附加资源');
-    const bundle = await buildOnlineAssets(source, lv.chart, preferences, track);
-
     let chart = lv.chart;
     let illustration = source.illustrationUrl;
     let song = source.songUrl;
@@ -624,13 +629,13 @@ export const preparePlay = async (
       progress.setDetail('下载谱面资源');
       const chartTask = progress.task();
       const illustrationTask = progress.task();
-      // 视频音乐（大文件）不预加载，交由引擎流式播放
-      const songTask = source.songIsVideo ? undefined : progress.task();
+      // 视频音乐也完整下载：牺牲加载时间，避免游玩过程中网络抖动造成音画卡顿。
+      const songTask = progress.task();
 
       const [chartBlob, illustrationBlob, songBlob] = await Promise.all([
-        downloadBlob(chart, '谱面', chartTask),
-        downloadBlob(illustration, '曲绘', illustrationTask),
-        songTask ? downloadBlob(song, '音乐', songTask) : Promise.resolve(null),
+        downloadBlob(chart, '谱面', chartTask, options.signal),
+        downloadBlob(illustration, '曲绘', illustrationTask, options.signal),
+        downloadBlob(song, source.songIsVideo ? '视频音乐' : '音乐', songTask, options.signal),
       ]);
 
       // 部分 CDN 对不存在的文件返回 200 + HTML 页面，这里提前拦住，避免进游玩页才报错
@@ -640,8 +645,12 @@ export const preparePlay = async (
 
       chart = track(URL.createObjectURL(chartBlob));
       illustration = track(URL.createObjectURL(illustrationBlob));
-      if (songBlob) song = track(URL.createObjectURL(songBlob));
+      song = track(URL.createObjectURL(songBlob));
     }
+
+    progress.setDetail('检查附加资源');
+    // songIsVideo 时使用刚下载完成的 Blob URL 合成 BGA，音频轨和背景视频都不再访问远程地址。
+    const bundle = await buildOnlineAssets({ ...source, songUrl: song }, lv.chart, preferences, track);
 
     progress.done();
     return {
@@ -680,8 +689,31 @@ export const resolvePlaySource = async (codename: string, level: Level): Promise
     }
   }
 
-  // 仅 phi 源可以只靠 codename 从 meta.json 还原
-  const rawCodename = codename.replace(/^(phi|ptc|pz)-/, '');
+  const parsed = codename.match(/^(phi|ptc|pz)-(.+)$/);
+  if (!parsed) throw new Error('无效的游玩链接');
+  const sourceId = parsed[1] as ChartSourceId;
+  const rawCodename = parsed[2];
+
+  // 直链访问时 sessionStorage 不一定存在。按 URL 中的源重新拉取目录，
+  // 找回 PTC/PhiZone 等源的完整资源地址，再交给统一的下载流程。
+  if (sourceId !== 'phi') {
+    const songs = await fetchSongs(sourceId);
+    const item = songs.find((song) => song.id === rawCodename);
+    const chart = item?.levels[level];
+    if (!item || !chart?.chart) throw new Error(`找不到该${sourceId.toUpperCase()}谱面或难度`);
+    return {
+      source: sourceId,
+      codename,
+      name: item.name,
+      artist: item.artist,
+      illustrationUrl: item.illustration,
+      songUrl: item.song,
+      levels: { [level]: chart },
+      backgroundAnimation: item.backgroundAnimation,
+      songIsVideo: item.songIsVideo,
+    };
+  }
+
   const meta = await fetchMeta(rawCodename);
   const chartFile = getChartFile(meta, level);
   if (!chartFile) throw new Error(`该曲目没有 ${level.toUpperCase()} 难度谱面`);

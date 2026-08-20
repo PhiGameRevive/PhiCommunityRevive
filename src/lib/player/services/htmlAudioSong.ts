@@ -18,16 +18,16 @@ export class HtmlAudioSong {
     });
   }
 
-  play() {
-    this._audio.play().catch(() => {});
+  play(): Promise<void> {
+    return this._audio.play();
   }
 
   pause() {
     this._audio.pause();
   }
 
-  resume() {
-    this._audio.play().catch(() => {});
+  resume(): Promise<void> {
+    return this._audio.play();
   }
 
   setSeek(time: number) {

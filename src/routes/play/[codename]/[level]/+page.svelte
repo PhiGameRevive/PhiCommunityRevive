@@ -3,6 +3,8 @@
   import { writable } from 'svelte/store';
   import { page } from '$app/state';
   import Player from '$lib/player/Player.svelte';
+  import PhigrosLoading from '$lib/components/PhigrosLoading.svelte';
+  import { randomTip } from '$lib/loadingTips';
   import type { Config } from '$lib/types';
   import { fetchMeta, type ChartMeta, type Level } from '$lib/meta';
   import { loadPreferences } from '$lib/preferences';
@@ -25,6 +27,10 @@
   let config: Config | null = null;
   let error = '';
   let prepared: PreparedPlay | null = null;
+  let loadingProgress = 0;
+  let loadingDetail = '准备谱面资源';
+  let loadingCover = '/ui/ElementSqare.webp';
+  let loadingTip = '';
 
   const resultStore = writable({ isNewBest: false, rankingScore: 0, accuracy: 0 });
 
@@ -40,8 +46,14 @@
       if (!prepared) {
         // 直接进入本页（刷新 / 书签 / 外链）：在此补做一次加载
         const source = await resolvePlaySource(codename, level);
+        loadingCover = source.illustrationUrl || loadingCover;
+        loadingDetail = '下载谱面资源';
         prepared = await preparePlay(source, level, loadPreferences(), {
           preloadResources: source.source !== 'local',
+          onProgress: (progress, detail) => {
+            loadingProgress = progress;
+            loadingDetail = detail;
+          },
         });
       }
       config = prepared.config;
@@ -51,6 +63,8 @@
 
     EventBus.on('finished', handleFinished);
   });
+
+  loadingTip = randomTip();
 
   onDestroy(() => {
     EventBus.off('finished', handleFinished);
@@ -152,9 +166,7 @@
     <Player bind:gameRef {config} {...$resultStore} />
   </div>
 {:else}
-  <div class="phi-page">
-    <p class="phi-hint">正在加载…</p>
-  </div>
+  <PhigrosLoading cover={loadingCover} tip={`${loadingTip}${loadingDetail ? ` · ${loadingDetail}` : ''}`} progress={loadingProgress} />
 {/if}
 
 <style>

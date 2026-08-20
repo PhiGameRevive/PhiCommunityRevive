@@ -25,6 +25,17 @@
     localStorage.setItem('autoplay', String(v));
   };
 
+  const leaveSettings = () => {
+    const firstUserFlow = sessionStorage.getItem('firstUserSetupReturn') === 'tutorial';
+    if (firstUserFlow) {
+      sessionStorage.removeItem('firstUserSetupReturn');
+      localStorage.setItem('phiOnboardingDone', 'true');
+      void goto('/play/ptc-r-intro/hd');
+      return;
+    }
+    void goto('/songs');
+  };
+
   const ASPECT_RATIOS: Record<string, [number, number]> = {
     '5:4': [5, 4],
     '4:3': [4, 3],
@@ -43,7 +54,7 @@
 
 <div class="page">
   <div class="header">
-    <button class="icon-btn back-btn" onclick={() => goto('/songs')} aria-label="返回"></button>
+    <button class="icon-btn back-btn" onclick={leaveSettings} aria-label="返回"></button>
     <h1 class="title">设置</h1>
   </div>
 
@@ -82,7 +93,7 @@
     </div>
     <div class="row">
       <span class="label">观看教学</span>
-      <button class="flat-btn" onclick={() => goto('/play/tutorial/ez')}>进入</button>
+      <button class="flat-btn" onclick={() => goto('/play/ptc-r-intro/hd')}>进入</button>
     </div>
   </section>
 
@@ -259,7 +270,7 @@
     </div>
   </section>
 
-  <button class="flat-btn done-btn" onclick={() => goto('/songs')}>完成</button>
+  <button class="flat-btn done-btn" onclick={leaveSettings}>完成</button>
 </div>
 
 <style>

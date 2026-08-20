@@ -31,6 +31,7 @@
   let credits: string[] = [];
 
   let showStart = false;
+  let showAudioStart = false;
   let showPause = false;
   let keyboardSeeking = false;
   let allowSeek = false;
@@ -75,7 +76,7 @@
       gameRef.scene = scene;
       status = scene.status;
       duration = scene.song.duration;
-      showStart = !config?.autostart && status === GameStatus.READY;
+      showStart = showAudioStart || (!config?.autostart && status === GameStatus.READY);
       allowSeek = (scene.autoplay || scene.practice) && !scene.render;
       const metadata = scene.metadata;
       title = metadata.title;
@@ -104,6 +105,12 @@
       status = GameStatus.PLAYING;
       keyboardSeeking = false;
       stillLoading = false;
+    });
+
+    EventBus.on('audio-blocked', () => {
+      showAudioStart = true;
+      showStart = true;
+      status = GameStatus.READY;
     });
 
     EventBus.on('error', () => {
@@ -189,14 +196,15 @@
       {/if}
       <button
         class="btn btn-start"
-        onclick={() => {
-          setTimeout(() => {
+        onclick={async () => {
+          const started = (await gameRef.scene?.start()) === true;
+          if (started) {
             showStart = false;
-          }, 500);
-          gameRef.scene?.start();
+            showAudioStart = false;
+          }
         }}
       >
-        开始
+        {showAudioStart ? '点击播放' : '开始'}
       </button>
     </div>
   {:else if showPause}

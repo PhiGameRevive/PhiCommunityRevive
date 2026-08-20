@@ -187,6 +187,12 @@
     exitTimer = window.setTimeout(() => {
       stage = 'loading';
       startLoading();
+      // 首次用户先完成基础设置；设置页返回时再自动进入 PTC 新手教程。
+      if (!localStorage.getItem('phiOnboardingDone')) {
+        sessionStorage.setItem('firstUserSetupReturn', 'tutorial');
+        window.setTimeout(() => goto('/settings'), 500);
+        return;
+      }
       // 随机一条左下角 Tip
       tipText = randomTip();
       // 谱面列表就绪后，随机挑一首歌的曲绘当加载背景（列表未就绪时用默认图兜底）

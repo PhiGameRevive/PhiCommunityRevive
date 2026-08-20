@@ -11,6 +11,7 @@
   let source: AudioBufferSourceNode | null = null;
   let startTime = 0;
   let loadingError = '';
+  const hasAllResults = () => [0, 1, 2, 3].every((i) => Number.isFinite(results[i]));
 
   onMount(async () => {
     try {
@@ -51,14 +52,14 @@
   };
 
   const finish = async () => {
-    if (results.length === 4) {
+    if (hasAllResults()) {
       const avg = Math.round(results.reduce((a, b) => a + b, 0) / 4);
       if (await confirmModal(`谱面延时即将被设置为 ${avg} ms，是否确认？`)) {
         const prefs = loadPreferences();
         savePreferences({ ...prefs, chartOffset: avg });
+        goto('/settings');
       }
     }
-    goto('/settings');
   };
 </script>
 
@@ -77,10 +78,12 @@
 
   {#if loadingError}
     <p class="phi-hint">{loadingError}</p>
-  {:else if !running}
+  {:else if !running && !hasAllResults()}
     <button onclick={start}>开始校准</button>
   {:else}
-    <button class="click-btn" onclick={click}>点击</button>
+    {#if running}
+      <button class="click-btn" onclick={click}>点击</button>
+    {/if}
     <div class="results">
       {#each [0, 1, 2, 3] as i}
         <div class="result-card">
@@ -89,7 +92,7 @@
         </div>
       {/each}
     </div>
-    {#if results.length === 4}
+    {#if hasAllResults()}
       <button onclick={finish}>完成</button>
     {/if}
   {/if}

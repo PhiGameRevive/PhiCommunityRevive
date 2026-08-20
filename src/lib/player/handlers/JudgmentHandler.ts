@@ -177,10 +177,18 @@ export class JudgmentHandler {
 
   createHitsound(note: PlainNote | LongNote) {
     if (this._scene.render) return;
-    this._scene.sound
-      .add(note.note.hitsound ? `asset-${note.note.hitsound}` : note.note.type.toString())
-      .setVolume(this._scene.preferences.hitSoundVolume)
-      .play();
+    const key = note.note.hitsound ? `asset-${note.note.hitsound}` : note.note.type.toString();
+    // 某些浏览器可能无法解码单个 OGG/音频资源。不要让缺失的打击音效
+    // 通过 Phaser SoundManager 抛异常并中断判定循环，静默跳过即可继续游玩。
+    if (!this._scene.cache.audio.exists(key)) {
+      console.warn(`打击音效 ${key} 不可用，跳过播放`);
+      return;
+    }
+    try {
+      this._scene.sound.add(key).setVolume(this._scene.preferences.hitSoundVolume).play();
+    } catch (error) {
+      console.warn(`打击音效 ${key} 播放失败`, error);
+    }
   }
 
   countJudgments() {

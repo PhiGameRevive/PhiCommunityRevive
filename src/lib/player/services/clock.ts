@@ -36,8 +36,9 @@ export class Clock {
     this.update();
   }
 
-  play() {
-    this._sound.play();
+  async play() {
+    const started = await this._sound.play();
+    if (started === false) throw new Error('音频自动播放被浏览器阻止');
     this.sync();
   }
 
@@ -46,8 +47,9 @@ export class Clock {
     this.sync();
   }
 
-  resume() {
-    this._sound.resume();
+  async resume() {
+    const started = await this._sound.resume();
+    if (started === false) throw new Error('音频播放被浏览器阻止');
     this.sync();
   }
 

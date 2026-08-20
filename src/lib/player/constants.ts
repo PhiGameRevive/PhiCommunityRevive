@@ -109,7 +109,8 @@ export const DEFAULT_RESOURCE_PACK: ResourcePack<string> & { id: string } = {
   hitSounds: (['Tap', 'Flick', 'Drag'] as const).map((name) => {
     return {
       name,
-      file: `${base}/game/hitsounds/${name}.ogg`,
+      // 静态目录实际文件名：Tap.ogg 保留大写，drag/flick 为小写。
+      file: `${base}/game/hitsounds/${name === 'Tap' ? 'Tap' : name.toLowerCase()}.ogg`,
     };
   }),
   hitEffects: {

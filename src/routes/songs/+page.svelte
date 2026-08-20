@@ -7,7 +7,7 @@
   import { fetchSongs, SOURCE_LABELS, type ChartSourceId, type SourceSong } from '$lib/sources';
   import { fetchPzCharts, fetchPzChartFile, getToken, login, setToken, PZ_LEVEL_TYPE } from '$lib/phizone';
   import { alert as alertModal, prompt as pzPrompt } from '$lib/modal';
-  import { loadPreferences } from '$lib/preferences';
+  import { loadPreferences, savePreferences } from '$lib/preferences';
   import { preparePlay, setPendingPlay, type PlaySource } from '$lib/playLoader';
   import { takePreloadedSongLists, peekPreloadedSongLists } from '$lib/preload';
   import PhigrosLoading from '$lib/components/PhigrosLoading.svelte';
@@ -57,6 +57,148 @@
   let showOverview = false;
   let loadProgress = 0;
   let loadDetail = '';
+  let previewAudio: HTMLAudioElement | null = null;
+  let previewUrl = '';
+  let previewRequest = 0;
+  let previewPlaying = false;
+  let showPreviewList = false;
+  let previewTime = 0;
+  let previewDuration = 0;
+  let loadingController: AbortController | null = null;
+  let loadingPrepared: import('$lib/playLoader').PreparedPlay | null = null;
+  let loadingRun = 0;
+  let readyCountdown = 0;
+  let readyTimer = 0;
+  let readyCountdownTimer = 0;
+  let readyResolve: (() => void) | null = null;
+  let settingsHover = false;
+  let settingsPressed = false;
+  let loadingPreferences = loadPreferences();
+  let previewContext: AudioContext | null = null;
+  let previewSource: MediaElementAudioSourceNode | null = null;
+  let previewFilter: BiquadFilterNode | null = null;
+  let previewGain: GainNode | null = null;
+
+  const stopPreview = () => {
+    previewRequest++;
+    previewSource?.disconnect();
+    previewFilter?.disconnect();
+    previewGain?.disconnect();
+    previewSource = null;
+    previewFilter = null;
+    previewGain = null;
+    if (previewContext && previewContext.state !== 'closed') void previewContext.close();
+    previewContext = null;
+    if (previewAudio) {
+      previewAudio.pause();
+      previewAudio.removeAttribute('src');
+      previewAudio.load();
+      previewAudio = null;
+    }
+    previewPlaying = false;
+    previewTime = 0;
+    previewDuration = 0;
+    if (previewUrl.startsWith('blob:')) URL.revokeObjectURL(previewUrl);
+    previewUrl = '';
+  };
+
+  const setPreviewMuffled = async (muffled: boolean) => {
+    const audio = previewAudio;
+    if (!audio) return;
+    try {
+      if (!previewContext) {
+        previewContext = new AudioContext();
+        previewSource = previewContext.createMediaElementSource(audio);
+        previewFilter = previewContext.createBiquadFilter();
+        previewFilter.type = 'lowpass';
+        previewFilter.Q.value = 1.25;
+        previewGain = previewContext.createGain();
+        previewGain.gain.value = 0.35;
+        audio.volume = 1;
+        previewSource.connect(previewFilter).connect(previewGain).connect(previewContext.destination);
+      }
+      if (previewContext.state === 'suspended') await previewContext.resume();
+      // 首次自动播放可能被浏览器拦截；这里处于“开始游玩”的用户点击手势中，
+      // 必须再次主动 play，否则只接上滤波链并不会让暂停中的音频开始播放。
+      if (audio.paused) await audio.play();
+      const now = previewContext.currentTime;
+      const frequency = previewFilter!.frequency;
+      frequency.cancelScheduledValues(now);
+      frequency.setValueAtTime(Math.max(frequency.value, 20), now);
+      frequency.exponentialRampToValueAtTime(muffled ? 650 : 18000, now + 0.45);
+    } catch (error) {
+      // 不支持 Web Audio / CORS 不允许接管音频时保留原始预览，不能阻断谱面加载。
+      console.warn('无法应用预览低通滤波', error);
+      audio.volume = 0.35;
+      if (audio.paused) {
+        try {
+          await audio.play();
+        } catch (playError) {
+          console.info('歌曲预览仍被浏览器阻止', playError);
+        }
+      }
+    }
+  };
+
+  const getPreviewUrl = (item: SongItem): string => {
+    if (item.source !== 'local') return item.songUrl;
+    const file = item.local?.files.find((f) => f.name === item.local?.musicFile);
+    return file ? URL.createObjectURL(file.blob) : '';
+  };
+
+  const playPreview = (item: SongItem | null) => {
+    stopPreview();
+    if (!item || !item.songUrl && !item.local) return;
+    const url = getPreviewUrl(item);
+    if (!url) return;
+    const request = previewRequest;
+    previewUrl = url;
+    previewAudio = new Audio();
+    // MediaElementAudioSource 接管远程音频时需要在设置 src 前声明 CORS，
+    // 否则部分浏览器不会报错，却会让滤波链输出静音。
+    previewAudio.crossOrigin = 'anonymous';
+    previewAudio.src = url;
+    previewAudio.loop = false;
+    previewAudio.volume = 0.35;
+    previewAudio.onplay = () => (previewPlaying = true);
+    previewAudio.onpause = () => (previewPlaying = false);
+    previewAudio.ontimeupdate = () => {
+      if (previewAudio) previewTime = previewAudio.currentTime;
+    };
+    previewAudio.ondurationchange = () => {
+      previewDuration = previewAudio && Number.isFinite(previewAudio.duration) ? previewAudio.duration : 0;
+    };
+    previewAudio.onended = () => shiftPreview(1);
+    void previewAudio.play().catch((error) => {
+      // 首次打开页面时浏览器可能阻止自动播放；用户点击选歌后会再次尝试。
+      if (request === previewRequest) console.info('歌曲预览需要用户手势才能播放', error);
+    });
+  };
+
+  const shiftPreview = (delta: number) => {
+    const list = currentList();
+    if (list.length === 0) return;
+    selectSong((current + delta + list.length) % list.length);
+  };
+
+  const togglePreview = () => {
+    if (!previewAudio) {
+      playPreview(song());
+      return;
+    }
+    if (previewAudio.paused) {
+      if (previewContext?.state === 'suspended') void previewContext.resume();
+      void previewAudio.play().catch((error) => console.info('歌曲预览需要用户手势才能播放', error));
+    } else {
+      previewAudio.pause();
+    }
+  };
+
+  const seekPreview = (value: number) => {
+    if (!previewAudio || !Number.isFinite(value)) return;
+    previewAudio.currentTime = Math.min(Math.max(value, 0), previewDuration || 0);
+    previewTime = previewAudio.currentTime;
+  };
 
   // ---- 搜索 ----
   let query = '';
@@ -67,6 +209,7 @@
       const lp = LEVELS.find((l) => first.levels[l]);
       if (lp) level = lp;
     }
+    playPreview(currentList()[0] ?? null);
   };
   const clearSearch = () => {
     query = '';
@@ -179,6 +322,64 @@
     starting = false;
     loadProgress = 0;
     loadDetail = '';
+  };
+
+  const clearReadyCountdown = () => {
+    clearTimeout(readyTimer);
+    clearInterval(readyCountdownTimer);
+    readyTimer = 0;
+    readyCountdownTimer = 0;
+  };
+
+  const scheduleReadyCountdown = () => {
+    clearReadyCountdown();
+    if (settingsHover || settingsPressed || !readyResolve) return;
+    readyCountdown = 3;
+    readyTimer = window.setTimeout(() => {
+      const resolve = readyResolve;
+      readyResolve = null;
+      clearReadyCountdown();
+      resolve?.();
+    }, 3000);
+    readyCountdownTimer = window.setInterval(() => {
+      readyCountdown = Math.max(1, readyCountdown - 1);
+    }, 1000);
+  };
+
+  const waitForReadyIdle = () =>
+    new Promise<void>((resolve) => {
+      readyResolve = resolve;
+      scheduleReadyCountdown();
+    });
+
+  const resetReadyCountdown = () => {
+    if (readyResolve) scheduleReadyCountdown();
+  };
+
+  const updateLoadingPreference = <K extends keyof typeof loadingPreferences>(
+    key: K,
+    value: (typeof loadingPreferences)[K],
+  ) => {
+    loadingPreferences = { ...loadingPreferences, [key]: value };
+    savePreferences(loadingPreferences);
+    if (loadingPrepared) loadingPrepared.config.preferences = loadingPreferences;
+    resetReadyCountdown();
+  };
+
+  const cancelSongLoading = () => {
+    if (!starting) return;
+    loadingRun++;
+    loadingController?.abort();
+    loadingController = null;
+    loadingPrepared?.release();
+    loadingPrepared = null;
+    clearReadyCountdown();
+    const resolve = readyResolve;
+    readyResolve = null;
+    resolve?.();
+    readyCountdown = 0;
+    stopLoadingAnimation();
+    void setPreviewMuffled(false);
   };
 
   /** LOADING 动画的最短展示时长，避免资源命中缓存时一闪而过。 */
@@ -347,6 +548,7 @@
         if (lp) level = lp;
       }
       loaded = true;
+      playPreview(currentList()[0] ?? null);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       loaded = true;
@@ -379,6 +581,11 @@
   onDestroy(() => {
     cancelAnimationFrame(animId);
     clearInterval(pageProgressTimer);
+    clearReadyCountdown();
+    readyResolve = null;
+    loadingController?.abort();
+    loadingPrepared?.release();
+    stopPreview();
     window.removeEventListener('pointermove', onPointerMove);
     window.removeEventListener('pointerup', onPointerUp);
     window.removeEventListener('pointercancel', onPointerUp);
@@ -393,6 +600,7 @@
       const lp = LEVELS.find((l) => first.levels[l]);
       if (lp) level = lp;
     }
+    playPreview(first ?? null);
   };
 
   const selectSong = (i: number) => {
@@ -403,6 +611,7 @@
       const lp = LEVELS.find((l) => s.levels[l]);
       if (lp) level = lp;
     }
+    playPreview(s);
   };
 
   // ---- 左栏拖拽选歌（pointer 事件，避免浏览器默认图片拖拽/下载）----
@@ -468,23 +677,48 @@
    * 组装好 Config 寄存给游玩页，再跳转。这样游玩页拿到的都是本地 blob，不再有网络等待。
    */
   const loadAndPlay = async (item: SongItem) => {
+    await setPreviewMuffled(true);
+    loadingPreferences = loadPreferences();
     startLoadingAnimation();
+    const run = ++loadingRun;
+    const controller = new AbortController();
+    loadingController = controller;
     try {
-      const prepared = await preparePlay(item as PlaySource, level, loadPreferences(), {
+      const prepared = await preparePlay(item as PlaySource, level, loadingPreferences, {
         preloadResources: item.source !== 'local',
         onProgress: (progress, detail) => {
           loadProgress = progress;
           loadDetail = detail;
         },
+        signal: controller.signal,
       });
+      if (run !== loadingRun || controller.signal.aborted) {
+        prepared.release();
+        return;
+      }
+      loadingPrepared = prepared;
+      prepared.config.preferences = loadingPreferences;
       rememberSong(item);
-      setPendingPlay(item.codename, level, prepared);
       loadProgress = 1;
-      loadDetail = '准备完成';
-      await waitForMinimumLoading();
+      loadDetail = '准备完成，等待操作';
+      await Promise.all([
+        waitForMinimumLoading(),
+        waitForReadyIdle(),
+      ]);
+      clearReadyCountdown();
+      if (run !== loadingRun || controller.signal.aborted) return;
+      loadingPrepared = null;
+      setPendingPlay(item.codename, level, prepared);
+      stopPreview();
+      loadingController = null;
       await goto(`/play/${encodeURIComponent(item.codename)}/${level}`);
     } catch (e) {
+      if (controller.signal.aborted || run !== loadingRun) return;
+      loadingController = null;
+      loadingPrepared = null;
+      clearReadyCountdown();
       stopLoadingAnimation();
+      void setPreviewMuffled(false);
       await alertModal(e instanceof Error ? e.message : '谱面加载失败');
     }
   };
@@ -545,7 +779,7 @@
   const onKey = (e: KeyboardEvent) => {
     if (starting) return;
     // 搜索框内输入时不响应选歌快捷键（Enter/空格会误触开始）
-    if ((e.target as HTMLElement | null)?.tagName === 'INPUT') return;
+    if (['INPUT', 'BUTTON', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement | null)?.tagName ?? '')) return;
     if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') selectSong((current - 1 + currentList().length) % currentList().length);
     if (e.key === 'ArrowDown' || e.key === 'ArrowRight') selectSong((current + 1) % currentList().length);
     if (e.key === 'Enter' || e.key === ' ') startPlay();
@@ -627,6 +861,65 @@
         </button>
       </div>
       <div class="top-actions">
+        <div class="preview-player">
+          <button
+            class="preview-info"
+            onclick={() => (showPreviewList = !showPreviewList)}
+            aria-expanded={showPreviewList}
+            aria-label="查看预览播放列表"
+          >
+            <span class="preview-label">PREVIEW</span>
+            <span class="preview-title">{s?.name ?? '暂无歌曲'}</span>
+          </button>
+          <div class="preview-controls">
+            <button onclick={() => shiftPreview(-1)} aria-label="上一曲">◀</button>
+            <button class="preview-toggle" onclick={togglePreview} aria-label={previewPlaying ? '暂停预览' : '播放预览'}>
+              {previewPlaying ? 'Ⅱ' : '▶'}
+            </button>
+            <button onclick={() => shiftPreview(1)} aria-label="下一曲">▶</button>
+            <button
+              class:active={showPreviewList}
+              onclick={() => (showPreviewList = !showPreviewList)}
+              aria-label="播放列表"
+            >☰</button>
+          </div>
+          <input
+            class="preview-progress"
+            type="range"
+            min="0"
+            max={previewDuration || 0}
+            step="0.05"
+            value={previewTime}
+            disabled={previewDuration <= 0}
+            style={`--preview-progress: ${previewDuration > 0 ? (previewTime / previewDuration) * 100 : 0}%`}
+            aria-label="预览播放进度"
+            oninput={(e) => seekPreview(Number(e.currentTarget.value))}
+          />
+          {#if showPreviewList}
+            <div class="preview-playlist">
+              <div class="preview-playlist-head">
+                <span>播放列表</span>
+                <span>{currentList().length}</span>
+              </div>
+              <div class="preview-playlist-body">
+                {#each currentList() as item, i}
+                  <button
+                    class="preview-playlist-item"
+                    class:active={i === current}
+                    onclick={() => selectSong(i)}
+                  >
+                    <img src={item.illustrationUrl} alt="" />
+                    <span>
+                      <strong>{item.name}</strong>
+                      <small>{item.artist}</small>
+                    </span>
+                    {#if i === current}<b>{previewPlaying ? '♪' : 'Ⅱ'}</b>{/if}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
         <span class="player-rks">RKS {rks.toFixed(2)}</span>
         {#if activeSource === 'pz'}
           <button
@@ -790,14 +1083,90 @@
       aria-label="开始游玩"
     ></button>
 
-    <!-- 右下角 Phigros loading 动画（复刻 ploading.js：文字 + xor 遮罩条横跳） -->
+    <!-- 歌曲加载界面：左侧曲绘/进度，右侧设置；设置交互会重置自动进入倒计时 -->
     {#if starting}
+      <div class="loading-state-glow" style="background-image: url('{s?.illustrationUrl ?? pageCover}')"></div>
       <canvas
         class="loading-canvas"
         bind:this={loadingCanvas}
         width={LOADING_W * LOADING_DPR}
         height={LOADING_H * LOADING_DPR}
       ></canvas>
+      <div class="song-loading-dock">
+        <aside
+          class="loading-settings"
+          onpointerenter={() => {
+            settingsHover = true;
+            clearReadyCountdown();
+          }}
+          onpointerleave={() => {
+            settingsHover = false;
+            settingsPressed = false;
+            resetReadyCountdown();
+          }}
+          onpointermove={resetReadyCountdown}
+          onpointerdown={() => {
+            settingsPressed = true;
+            clearReadyCountdown();
+          }}
+          onpointerup={(e) => {
+            settingsPressed = false;
+            if (e.pointerType === 'touch') settingsHover = false;
+            resetReadyCountdown();
+          }}
+          onpointercancel={(e) => {
+            settingsPressed = false;
+            if (e.pointerType === 'touch') settingsHover = false;
+            resetReadyCountdown();
+          }}
+        >
+          <div class="loading-settings-head">
+            <div>
+              <span>PLAY SETTINGS</span>
+              <strong>游玩设置</strong>
+            </div>
+            {#if loadProgress >= 1}
+              <small>{settingsHover || settingsPressed ? '等待操作结束' : `${readyCountdown} 秒后进入`}</small>
+            {:else}
+              <small>{Math.round(loadProgress * 100)}%</small>
+            {/if}
+          </div>
+          <div class="loading-settings-body">
+            <label class="loading-setting-row">
+              <span>谱面延时 <b>{loadingPreferences.chartOffset} ms</b></span>
+              <input type="range" min="-500" max="500" step="5" value={loadingPreferences.chartOffset} oninput={(e) => updateLoadingPreference('chartOffset', Number(e.currentTarget.value))} />
+            </label>
+            <label class="loading-setting-row">
+              <span>谱面倍速 <b>{Math.round(loadingPreferences.timeScale * 100)}%</b></span>
+              <input type="range" min="0.7" max="1.5" step="0.05" value={loadingPreferences.timeScale} oninput={(e) => updateLoadingPreference('timeScale', Number(e.currentTarget.value))} />
+            </label>
+            <label class="loading-setting-row">
+              <span>按键缩放 <b>{Math.round(loadingPreferences.noteSize * 100)}%</b></span>
+              <input type="range" min="0.5" max="1.5" step="0.05" value={loadingPreferences.noteSize} oninput={(e) => updateLoadingPreference('noteSize', Number(e.currentTarget.value))} />
+            </label>
+            <label class="loading-setting-row">
+              <span>背景模糊 <b>{loadingPreferences.backgroundBlur.toFixed(1)}</b></span>
+              <input type="range" min="0" max="3" step="0.1" value={loadingPreferences.backgroundBlur} oninput={(e) => updateLoadingPreference('backgroundBlur', Number(e.currentTarget.value))} />
+            </label>
+            <label class="loading-setting-row">
+              <span>背景亮度 <b>{Math.round(loadingPreferences.backgroundLuminance * 100)}%</b></span>
+              <input type="range" min="0" max="1" step="0.05" value={loadingPreferences.backgroundLuminance} oninput={(e) => updateLoadingPreference('backgroundLuminance', Number(e.currentTarget.value))} />
+            </label>
+            <label class="loading-setting-row">
+              <span>音乐音量 <b>{Math.round(loadingPreferences.musicVolume * 100)}%</b></span>
+              <input type="range" min="0" max="1" step="0.05" value={loadingPreferences.musicVolume} oninput={(e) => updateLoadingPreference('musicVolume', Number(e.currentTarget.value))} />
+            </label>
+            <label class="loading-setting-row">
+              <span>打击音效 <b>{Math.round(loadingPreferences.hitSoundVolume * 100)}%</b></span>
+              <input type="range" min="0" max="1" step="0.05" value={loadingPreferences.hitSoundVolume} oninput={(e) => updateLoadingPreference('hitSoundVolume', Number(e.currentTarget.value))} />
+            </label>
+            <button class="loading-setting-toggle" class:on={loadingPreferences.simultaneousNoteHint} onclick={() => updateLoadingPreference('simultaneousNoteHint', !loadingPreferences.simultaneousNoteHint)}><span>多押辅助</span><i></i></button>
+            <button class="loading-setting-toggle" class:on={loadingPreferences.fcApIndicator} onclick={() => updateLoadingPreference('fcApIndicator', !loadingPreferences.fcApIndicator)}><span>FC/AP 指示器</span><i></i></button>
+            <button class="loading-setting-toggle" class:on={loadingPreferences.useVideoBackground} onclick={() => updateLoadingPreference('useVideoBackground', !loadingPreferences.useVideoBackground)}><span>视频背景</span><i></i></button>
+          </div>
+          <button class="cancel-loading-btn" onclick={cancelSongLoading}>取消加载</button>
+        </aside>
+      </div>
     {/if}
 
     <!-- 拖拽幽灵浮层（跟随指针） -->
@@ -964,6 +1333,237 @@
     display: flex;
     align-items: center;
     gap: 10px;
+  }
+
+  .preview-player {
+    position: relative;
+    height: 34px;
+    display: flex;
+    align-items: stretch;
+    background: rgba(8, 8, 12, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+
+  .preview-info {
+    width: 108px;
+    min-width: 0;
+    padding: 4px 8px;
+    border: 0;
+    border-right: 1px solid rgba(255, 255, 255, 0.16);
+    background: transparent;
+    color: #fff;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .preview-label {
+    color: rgba(255, 255, 255, 0.48);
+    font: 600 0.58rem/1 'Courier New', ui-monospace, monospace;
+    letter-spacing: 0.14em;
+  }
+
+  .preview-title {
+    margin-top: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.64rem;
+    font-weight: 700;
+  }
+
+  .preview-controls {
+    display: flex;
+    align-items: stretch;
+  }
+
+  .preview-controls button {
+    width: 26px;
+    padding: 0;
+    border: 0;
+    border-left: 1px solid rgba(255, 255, 255, 0.12);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 0.6rem;
+    cursor: pointer;
+    transition: background 140ms ease, color 140ms ease, transform 100ms ease-out;
+  }
+
+  .preview-controls button:hover,
+  .preview-controls button.active {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+  }
+
+  .preview-controls button:active {
+    transform: scale(0.94);
+  }
+
+  .preview-controls .preview-toggle {
+    width: 30px;
+    color: #fff;
+    font-size: 0.7rem;
+  }
+
+  .preview-progress {
+    appearance: none;
+    -webkit-appearance: none;
+    position: absolute;
+    left: -1px;
+    right: -1px;
+    bottom: -3px;
+    width: calc(100% + 2px);
+    height: 7px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    cursor: pointer;
+    z-index: 2;
+  }
+
+  .preview-progress::-webkit-slider-runnable-track {
+    height: 2px;
+    background: linear-gradient(
+      to right,
+      #fff 0 var(--preview-progress),
+      rgba(255, 255, 255, 0.2) var(--preview-progress) 100%
+    );
+  }
+
+  .preview-progress::-moz-range-track {
+    height: 2px;
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .preview-progress::-moz-range-progress {
+    height: 2px;
+    background: #fff;
+  }
+
+  .preview-progress::-webkit-slider-thumb {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 7px;
+    height: 7px;
+    margin-top: -2.5px;
+    border: 0;
+    border-radius: 50%;
+    background: #fff;
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+
+  .preview-progress::-moz-range-thumb {
+    width: 7px;
+    height: 7px;
+    border: 0;
+    border-radius: 50%;
+    background: #fff;
+    opacity: 0;
+  }
+
+  .preview-player:hover .preview-progress::-webkit-slider-thumb,
+  .preview-progress:focus-visible::-webkit-slider-thumb,
+  .preview-player:hover .preview-progress::-moz-range-thumb,
+  .preview-progress:focus-visible::-moz-range-thumb {
+    opacity: 1;
+  }
+
+  .preview-progress:disabled {
+    cursor: default;
+    opacity: 0.45;
+  }
+
+  .preview-playlist {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    width: min(340px, 82vw);
+    max-height: min(440px, 68vh);
+    display: flex;
+    flex-direction: column;
+    background: rgba(10, 10, 14, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.56);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    z-index: 50;
+  }
+
+  .preview-playlist-head {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 11px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+    color: rgba(255, 255, 255, 0.68);
+    font: 700 0.7rem/1 'Courier New', ui-monospace, monospace;
+    letter-spacing: 0.08em;
+  }
+
+  .preview-playlist-body {
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .preview-playlist-item {
+    width: 100%;
+    min-height: 54px;
+    padding: 7px 9px;
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr) 20px;
+    align-items: center;
+    gap: 9px;
+    border: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.72);
+    text-align: left;
+  }
+
+  .preview-playlist-item:hover,
+  .preview-playlist-item.active {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+  }
+
+  .preview-playlist-item img {
+    width: 42px;
+    height: 42px;
+    object-fit: cover;
+  }
+
+  .preview-playlist-item span {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .preview-playlist-item strong,
+  .preview-playlist-item small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .preview-playlist-item strong {
+    font-size: 0.76rem;
+  }
+
+  .preview-playlist-item small {
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 0.66rem;
+  }
+
+  .preview-playlist-item b {
+    text-align: center;
+    font-size: 0.8rem;
   }
 
   .player-rks {
@@ -1241,12 +1841,13 @@
     padding: 24px;
     min-width: 0;
     position: relative;
-    transition: opacity 0.45s ease;
+    transition: opacity 0.45s ease, transform 0.65s cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   /* 开始动画：列表收起后 detail 占据全宽，内容自然移向中央；曲绘非线性放大 */
   .detail.detail-center {
     opacity: 1;
+    transform: translateX(-10vw);
   }
 
   /* 拖拽到中间的目标高亮 */
@@ -1442,7 +2043,7 @@
   /* 右下角 Phigros loading 动画（复刻 ploading.js） */
   .loading-canvas {
     position: absolute;
-    right: 22px;
+    right: calc(min(360px, 31vw) + 28px);
     bottom: 22px;
     width: 340px;
     height: 160px;
@@ -1450,13 +2051,267 @@
     animation: loading-in 0.3s ease;
   }
 
+  /* 加载时保留选歌页本体；只在右侧嵌入设置 dock，不再覆盖成独立弹窗。 */
+  .loading-state-glow {
+    position: absolute;
+    inset: 0;
+    z-index: 35;
+    pointer-events: none;
+    background-position: center;
+    background-size: cover;
+    filter: blur(28px) brightness(0.28) saturate(0.8);
+    opacity: 0.2;
+    transform: scale(1.08);
+    transition: opacity 420ms ease, filter 420ms ease;
+  }
+
+  .song-loading-dock {
+    position: absolute;
+    top: 64px;
+    right: 0;
+    bottom: 0;
+    width: min(360px, 31vw);
+    z-index: 76;
+    padding: 18px 18px 22px;
+    background: linear-gradient(90deg, rgba(8, 8, 12, 0.18), rgba(8, 8, 12, 0.88) 18%);
+    pointer-events: none;
+    animation: loading-dock-in 420ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+
+  .song-loading-dock .loading-settings {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    pointer-events: auto;
+    padding: 20px 18px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+    background: rgba(10, 10, 14, 0.78);
+    box-shadow: -18px 14px 50px rgba(0, 0, 0, 0.28);
+    backdrop-filter: blur(18px) saturate(1.2);
+    -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  }
+
+  @keyframes loading-dock-in {
+    from {
+      opacity: 0;
+      transform: translateX(28px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  .song-loading-dock .loading-settings-head strong::after {
+    content: ' · LOADING';
+    color: rgba(255, 255, 255, 0.38);
+    font: 600 0.62rem 'Courier New', ui-monospace, monospace;
+    letter-spacing: 0.08em;
+  }
+
+  .loading-settings {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 28px clamp(18px, 2.5vw, 42px) 22px;
+    border-left: 1px solid rgba(255, 255, 255, 0.16);
+    background: rgba(10, 10, 14, 0.97);
+    color: #fff;
+  }
+
+  .loading-settings-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  }
+
+  .loading-settings-head div {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .loading-settings-head span {
+    color: rgba(255, 255, 255, 0.42);
+    font: 700 0.62rem/1 'Courier New', ui-monospace, monospace;
+    letter-spacing: 0.16em;
+  }
+
+  .loading-settings-head strong {
+    font-size: 1.25rem;
+  }
+
+  .loading-settings-head small {
+    max-width: 105px;
+    color: rgba(255, 255, 255, 0.58);
+    font: 600 0.65rem/1.4 'Courier New', ui-monospace, monospace;
+    text-align: right;
+  }
+
+  .loading-settings-body {
+    min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 2px 18px 0;
+  }
+
+  .loading-setting-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 0;
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 0.76rem;
+  }
+
+  .loading-setting-row span {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .loading-setting-row b {
+    color: rgba(255, 255, 255, 0.48);
+    font: 600 0.68rem 'Courier New', ui-monospace, monospace;
+  }
+
+  .loading-setting-row input {
+    width: 100%;
+    accent-color: #fff;
+  }
+
+  .loading-setting-toggle {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0;
+    border: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.76rem;
+    text-align: left;
+  }
+
+  .loading-setting-toggle i {
+    width: 28px;
+    height: 15px;
+    position: relative;
+    border: 1px solid rgba(255, 255, 255, 0.38);
+    border-radius: 99px;
+  }
+
+  .loading-setting-toggle i::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.5);
+    transition: transform 160ms ease-out, background 160ms ease-out;
+  }
+
+  .loading-setting-toggle.on i::after {
+    transform: translateX(13px);
+    background: #fff;
+  }
+
+  .loading-settings .cancel-loading-btn {
+    position: static;
+    flex-shrink: 0;
+    width: 100%;
+    margin-top: auto;
+    padding: 11px 14px;
+  }
+
+  .cancel-loading-btn {
+    position: absolute;
+    right: 42px;
+    bottom: 28px;
+    z-index: 81;
+    padding: 7px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.42);
+    border-radius: 2px;
+    background: rgba(8, 8, 12, 0.68);
+    color: rgba(255, 255, 255, 0.76);
+    font: 700 0.68rem/1 'Courier New', ui-monospace, monospace;
+    letter-spacing: 0.08em;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    cursor: pointer;
+    transition: background 140ms ease, color 140ms ease, transform 100ms ease-out;
+  }
+
+  .cancel-loading-btn:hover {
+    background: #fff;
+    color: #0a0a0c;
+  }
+
+  .cancel-loading-btn:active {
+    transform: scale(0.96);
+  }
+
   /* 窄屏按比例缩小，避免遮挡歌曲详情 */
   @media (max-width: 860px) {
+    .detail.detail-center {
+      transform: translateY(-12vh);
+    }
+
+    .song-loading-dock {
+      top: auto;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      width: auto;
+      height: min(52vh, 430px);
+      padding: 0;
+      background: none;
+    }
+
+    .song-loading-dock .loading-settings {
+      padding: 14px 14px 12px;
+    }
+
+    .loading-settings {
+      min-height: 0;
+      padding: 16px 18px 14px;
+    }
+
+    .loading-settings-body {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      column-gap: 18px;
+    }
+
+    .loading-settings-head {
+      padding-bottom: 10px;
+    }
+
+    .loading-setting-row {
+      padding: 8px 0;
+    }
+
+    .loading-settings .cancel-loading-btn {
+      margin-top: 6px;
+    }
+
     .loading-canvas {
       right: 12px;
       bottom: 12px;
       width: 250px;
       height: 118px;
+    }
+
+    .cancel-loading-btn {
+      right: 24px;
+      bottom: 18px;
     }
   }
 
@@ -1704,6 +2559,281 @@
 
     .top-bar {
       padding: 0 12px;
+    }
+
+    .preview-info,
+    .player-rks {
+      display: none;
+    }
+
+    .preview-player {
+      height: 32px;
+    }
+
+    .preview-controls button {
+      width: 25px;
+    }
+  }
+
+  /* ---- 响应式收尾：平板 / 手机竖屏 / 手机横屏分别布局 ---- */
+  @media (max-width: 1180px) and (min-width: 861px) {
+    .top-bar {
+      gap: 10px;
+      padding: 0 14px;
+    }
+
+    .source-tabs {
+      gap: 3px;
+    }
+
+    .source-tab {
+      padding-inline: 8px;
+      font-size: 0.78rem;
+    }
+
+    .preview-info,
+    .player-rks {
+      display: none;
+    }
+
+    .top-actions {
+      gap: 6px;
+    }
+
+    .song-loading-dock {
+      width: min(330px, 35vw);
+      padding: 12px 12px 16px;
+    }
+
+    .loading-canvas {
+      right: calc(min(330px, 35vw) + 12px);
+      width: clamp(220px, 27vw, 300px);
+      height: auto;
+    }
+
+    .detail.detail-center {
+      transform: translateX(-13vw);
+    }
+  }
+
+  @media (max-width: 860px) and (orientation: portrait) {
+    .top-bar {
+      height: 56px;
+      gap: 6px;
+    }
+
+    .top-actions {
+      gap: 5px;
+    }
+
+    .icon-btn {
+      width: 34px;
+      height: 34px;
+    }
+
+    .pz-login-btn {
+      max-width: 84px;
+      overflow: hidden;
+      padding: 6px 8px;
+      text-overflow: ellipsis;
+    }
+
+    .song-list {
+      width: clamp(104px, 34vw, 150px);
+      padding: 6px;
+    }
+
+    .song-search {
+      padding-bottom: 6px;
+    }
+
+    .search-input {
+      height: 32px;
+      padding: 6px 8px;
+      font-size: 0.66rem;
+    }
+
+    .song-item {
+      gap: 4px;
+      padding: 5px;
+    }
+
+    .item-levels {
+      gap: 2px;
+    }
+
+    .mini-level {
+      padding: 2px 4px;
+      font-size: 0.54rem;
+    }
+
+    .detail {
+      gap: 6px;
+      padding: 12px 10px;
+    }
+
+    .detail-img {
+      width: min(100%, 430px);
+    }
+
+    .detail-name {
+      max-width: 96%;
+      font-size: clamp(1rem, 5vw, 1.5rem);
+    }
+
+    .detail-artist {
+      font-size: 0.72rem;
+    }
+
+    .detail.detail-center {
+      padding-bottom: min(48dvh, 390px);
+      transform: translateY(-3vh);
+    }
+
+    .detail.detail-center .detail-img {
+      width: min(76vw, 410px);
+      transform: scale(1.02);
+    }
+
+    .song-loading-dock {
+      left: 8px;
+      right: 8px;
+      bottom: max(8px, env(safe-area-inset-bottom));
+      width: auto;
+      height: min(48dvh, 390px);
+    }
+
+    .song-loading-dock .loading-settings {
+      padding: 12px 12px 10px;
+    }
+
+    .loading-settings-head strong {
+      font-size: 0.95rem;
+    }
+
+    .loading-settings-head small {
+      font-size: 0.58rem;
+    }
+
+    .loading-settings-body {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0 14px;
+      padding-block: 5px 8px;
+    }
+
+    .loading-setting-row,
+    .loading-setting-toggle {
+      min-width: 0;
+      padding: 6px 0;
+      font-size: 0.66rem;
+    }
+
+    .loading-setting-row {
+      gap: 3px;
+    }
+
+    .loading-setting-row b {
+      font-size: 0.58rem;
+    }
+
+    .loading-settings .cancel-loading-btn {
+      padding-block: 8px;
+    }
+
+    .loading-canvas {
+      left: max(8px, calc(50% - 100px));
+      right: auto;
+      bottom: calc(min(48dvh, 390px) + 12px);
+      width: clamp(150px, 46vw, 200px);
+      height: auto;
+    }
+  }
+
+  @media (max-width: 860px) and (orientation: landscape), (max-height: 560px) and (max-width: 1000px) {
+    .top-bar {
+      height: 52px;
+    }
+
+    .song-loading-dock {
+      top: 52px;
+      left: auto;
+      right: 8px;
+      bottom: 8px;
+      width: min(390px, 44vw);
+      height: auto;
+    }
+
+    .song-loading-dock .loading-settings {
+      padding: 10px 12px;
+    }
+
+    .loading-settings-head {
+      padding-bottom: 7px;
+    }
+
+    .loading-settings-body {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0 12px;
+      padding-block: 4px;
+    }
+
+    .loading-setting-row,
+    .loading-setting-toggle {
+      padding: 4px 0;
+      font-size: 0.62rem;
+    }
+
+    .detail.detail-center {
+      padding-bottom: 0;
+      transform: translateX(-20vw);
+    }
+
+    .detail.detail-center .detail-img {
+      width: min(46vw, 470px);
+      transform: scale(1.02);
+    }
+
+    .loading-canvas {
+      left: 8px;
+      right: auto;
+      bottom: 6px;
+      width: clamp(150px, 24vw, 210px);
+      height: auto;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .top-actions .upload-btn,
+    .top-actions .list-btn {
+      display: none;
+    }
+
+    .preview-controls button {
+      width: 23px;
+    }
+
+    .song-list {
+      width: 30vw;
+      min-width: 96px;
+    }
+
+    .detail {
+      padding-inline: 7px;
+    }
+
+    .level-btn {
+      min-width: 42px;
+      padding: 7px 8px;
+    }
+
+    .loading-settings-head span,
+    .song-loading-dock .loading-settings-head strong::after {
+      display: none;
+    }
+
+    .loading-setting-toggle i {
+      flex-shrink: 0;
     }
   }
 </style>
