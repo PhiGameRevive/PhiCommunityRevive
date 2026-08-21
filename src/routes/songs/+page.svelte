@@ -57,7 +57,7 @@
   let showOverview = false;
   let loadProgress = 0;
   let loadDetail = '';
-  let previewAudio: HTMLAudioElement | null = null;
+  let previewAudio: HTMLMediaElement | null = null;
   let previewUrl = '';
   let previewRequest = 0;
   let previewPlaying = false;
@@ -153,10 +153,20 @@
     if (!url) return;
     const request = previewRequest;
     previewUrl = url;
-    previewAudio = new Audio();
+    // 视频作为音乐时用 video 元素解码音轨；部分浏览器用 Audio 打开 MP4/WebM
+    // 会成功加载却没有声音。普通歌曲仍使用轻量的 Audio 元素。
+    previewAudio = item.songIsVideo ? document.createElement('video') : new Audio();
     // MediaElementAudioSource 接管远程音频时需要在设置 src 前声明 CORS，
     // 否则部分浏览器不会报错，却会让滤波链输出静音。
     previewAudio.crossOrigin = 'anonymous';
+    previewAudio.preload = 'auto';
+    if (previewAudio instanceof HTMLVideoElement) {
+      previewAudio.muted = false;
+      previewAudio.controls = false;
+      previewAudio.playsInline = true;
+      previewAudio.setAttribute('aria-hidden', 'true');
+      previewAudio.style.display = 'none';
+    }
     previewAudio.src = url;
     previewAudio.loop = false;
     previewAudio.volume = 0.35;
