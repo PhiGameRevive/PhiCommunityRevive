@@ -44,6 +44,8 @@
   let pausedByBar = false;
   let fastSeeking = false;
   let seekTarget = 0;
+  /** 恢复播放进行中（回退 + 倒计时），防止重复点击继续 */
+  let resuming = false;
   let persistentSeekBar = false;
   let countdown = 0;
   let counter: ReturnType<typeof setInterval> | undefined;
@@ -183,6 +185,9 @@
   });
 
   onDestroy(async () => {
+    // 倒计时进行中退出页面：停止计时器并释放暂停锁，避免残留状态
+    clearInterval(counter);
+    if (gameRef.scene) gameRef.scene.resumeLock = false;
     // 先停掉所有声音，避免 Phaser 销毁不彻底导致音乐残留叠加
     gameRef.game?.sound?.stopAll?.();
     gameRef.scene?.destroy();
@@ -196,12 +201,16 @@
   };
 
   const resume = () => {
+    // 防止重复触发：倒计时进行中忽略再次点击继续/暂停
+    if (resuming) return;
+    resuming = true;
     setTimeout(() => {
       showPause = false;
     }, 500);
     if (gameRef.scene?.autoplay) {
       status = GameStatus.PLAYING;
       gameRef.scene?.resume();
+      resuming = false;
     } else {
       // 普通游玩/回放/练习：回退 3 秒后立即播放，显示 3/2/1 作为视觉提示。
       // 已判定或已 Miss 的 note 在回退区间内保持原状态，不会重新出现。
@@ -214,6 +223,8 @@
         if (countdown <= 0) {
           clearInterval(counter);
           countdown = 0;
+          resuming = false;
+          if (gameRef.scene) gameRef.scene.resumeLock = false;
         }
       }, 1000);
     }

@@ -145,6 +145,8 @@ export class Game extends Scene {
   private _fastForwardGameTime = 0;
   /** 暂停后回退时保留已经判定过的 note，直到追上暂停前的位置。 */
   private _preserveJudgmentsUntil: number | null = null;
+  /** 恢复播放（回退 + 倒计时）期间锁定暂停入口，防止 Space/Esc/按钮重复触发。 */
+  private _resumeLock = false;
   private _autostart = false;
   private _adjustOffset = false;
   private _render = false;
@@ -568,6 +570,8 @@ export class Game extends Scene {
 
   pause(emittedBySpace: boolean = false) {
     if (this._status === GameStatus.ERROR || !this._song.isPlaying) return;
+    // 恢复播放（回退 + 倒计时）进行中：忽略暂停请求，防止重复触发把流程打断
+    if (this._resumeLock) return;
     // 失败演出期间不接受暂停（减速动画需要跑完）
     if (this._status === GameStatus.FAILED) return;
     clearTimeout(this._timeout);
@@ -786,6 +790,7 @@ export class Game extends Scene {
   /** 回退后立即播放，Player 只负责在画面上显示 3/2/1 倒计时。 */
   async resumeWithRewind(seconds = 3) {
     if (this._status !== GameStatus.PAUSED || !this._song) return;
+    this._resumeLock = true;
     const pauseTime = this.timeSec;
     const target = Math.max(0, pauseTime - seconds);
     this._preserveJudgmentsUntil = pauseTime;
@@ -794,6 +799,11 @@ export class Game extends Scene {
     await this._clock.resume();
     this._videos?.forEach((video) => video.resume());
     EventBus.emit('started');
+  }
+
+  /** 由 Player 在倒计时结束后解除暂停锁。 */
+  public set resumeLock(value: boolean) {
+    this._resumeLock = value;
   }
 
   /** 原子取消当前快进，供用户在追赶期间再次拖动。 */
