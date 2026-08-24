@@ -91,10 +91,10 @@ export class LongNote extends GameObjects.Container {
   update(beat: number, songTime: number, height: number) {
     this.setX(this._scene.p(this._xModifier * this._data.positionX));
     this.resize();
-    if (this._beatJudged && beat < this._beatJudged) {
+    if (this._beatJudged && beat < this._beatJudged && !this._scene.preserveJudgments) {
       this._scene.judgment.unjudge(this);
     }
-    if (this._beatTempJudged && beat < this._beatTempJudged) {
+    if (this._beatTempJudged && beat < this._beatTempJudged && !this._scene.preserveJudgments) {
       this.resetTemp();
     }
     const yOffset = this._scene.o(this._data.yOffset);

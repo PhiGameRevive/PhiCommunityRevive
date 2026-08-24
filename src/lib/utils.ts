@@ -289,6 +289,7 @@ export const getParams = (url?: string, loadFromStorage = true): Config | null =
       timeScale,
       useVideoBackground: true,
       videoBackgroundAlpha: 0.5,
+      persistentSeekBar: false,
     },
     mediaOptions: {
       frameRate,

@@ -83,6 +83,8 @@ export interface PrepareOptions {
   signal?: AbortSignal;
   /** 本次游玩启用的模组；不传时读取已保存的选择。 */
   mods?: ModId[];
+  /** 回放查看时注入的回放文件 */
+  replay?: import('$lib/types').ReplayFile;
 }
 
 /* ---------------- 下载与进度 ---------------- */
@@ -496,6 +498,7 @@ const makeConfig = (params: {
   songIsVideo: boolean;
   /** 本次游玩启用的模组（AT 会开启引擎的 autoplay） */
   mods: ModId[];
+  replay?: import('$lib/types').ReplayFile;
 }): Config => ({
   resources: params.resources,
   metadata: {
@@ -524,6 +527,7 @@ const makeConfig = (params: {
   practice: isPractice(params.mods),
   noFail: isNoFail(params.mods),
   hidden: isHidden(params.mods),
+  replay: params.replay,
   adjustOffset: false,
   render: false,
   autostart: true,
@@ -587,6 +591,7 @@ export const preparePlay = async (
           preferences,
           songIsVideo: false,
           mods,
+          replay: options.replay,
         }),
         release,
       };
@@ -635,6 +640,7 @@ export const preparePlay = async (
           preferences,
           songIsVideo,
           mods,
+          replay: options.replay,
         }),
         release,
       };
@@ -684,7 +690,8 @@ export const preparePlay = async (
         resources: { song, chart, illustration, ...bundle },
         preferences,
         songIsVideo: source.songIsVideo === true,
-        mods,
+          mods,
+          replay: options.replay,
       }),
       release,
     };

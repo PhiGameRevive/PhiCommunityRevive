@@ -15,10 +15,13 @@ export interface PlayResult {
   rankingScore: number;
 }
 
+import type { ReplayFile } from './types';
+
 const DB_NAME = 'PhiCommunityPlayResults';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const INDEXES = ['level', 'levelRank', 'score', 'accuracy', 'rankingScore'];
 const CHART_STORE = 'localCharts';
+const REPLAY_STORE = 'replays';
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -37,6 +40,11 @@ function openDatabase(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(CHART_STORE)) {
         db.createObjectStore(CHART_STORE, { keyPath: 'codename' });
+      }
+      if (!db.objectStoreNames.contains(REPLAY_STORE)) {
+        const store = db.createObjectStore(REPLAY_STORE, { keyPath: 'id' });
+        store.createIndex('createdAt', 'createdAt', { unique: false });
+        store.createIndex('codename', 'source.codename', { unique: false });
       }
     };
 
@@ -59,6 +67,49 @@ function getStore(db: IDBDatabase): IDBObjectStore {
 
 function getChartStore(db: IDBDatabase): IDBObjectStore {
   return db.transaction([CHART_STORE], 'readwrite').objectStore(CHART_STORE);
+}
+
+function getReplayStore(db: IDBDatabase, mode: IDBTransactionMode = 'readwrite'): IDBObjectStore {
+  return db.transaction([REPLAY_STORE], mode).objectStore(REPLAY_STORE);
+}
+
+export async function saveReplay(replay: ReplayFile): Promise<void> {
+  const db = await openDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const request = getReplayStore(db).put(replay);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+export async function getAllReplays(): Promise<ReplayFile[]> {
+  const db = await openDatabase();
+  try {
+    return await new Promise((resolve, reject) => {
+      const request = getReplayStore(db, 'readonly').getAll();
+      request.onsuccess = () => resolve((request.result as ReplayFile[]).sort((a, b) => b.createdAt - a.createdAt));
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+export async function deleteReplay(id: string): Promise<void> {
+  const db = await openDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const request = getReplayStore(db).delete(id);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 export async function getResult(key: string): Promise<PlayResult | undefined> {

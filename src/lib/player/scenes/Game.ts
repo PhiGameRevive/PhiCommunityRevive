@@ -136,6 +136,15 @@ export class Game extends Scene {
   private _noFail = false;
   /** 下隐（HD 模组）：音符接近判定线时淡出隐藏 */
   private _hidden = false;
+  private _replayIndex = 0;
+  private _fastForwardToken = 0;
+  private _fastForwardTarget: number | null = null;
+  private _fastForwardSimTime = 0;
+  private _fastForwardResumeAfter = false;
+  private _fastForwardResolve: (() => void) | null = null;
+  private _fastForwardGameTime = 0;
+  /** 暂停后回退时保留已经判定过的 note，直到追上暂停前的位置。 */
+  private _preserveJudgmentsUntil: number | null = null;
   private _autostart = false;
   private _adjustOffset = false;
   private _render = false;
@@ -705,10 +714,23 @@ export class Game extends Scene {
     return this._hidden;
   }
 
+  public get replay() {
+    return this._data.replay;
+  }
+
+  public get fastForwarding() {
+    return this._fastForwardTarget !== null;
+  }
+
+  public get preserveJudgments() {
+    return this._preserveJudgmentsUntil !== null;
+  }
+
   end() {
     if (this._status === GameStatus.ERROR) return;
     // 失败演出进行中/已失败：不再走结算
     if (this._status === GameStatus.FAILED) return;
+    if (this._fastForwardTarget !== null) return;
     // 练习模式：播完不结算，改为停在暂停界面，玩家可继续跳转或主动退出。
     // 不能直接复用 pause()：歌曲已播完，isPlaying 为 false 会让它提前 return。
     if (this._practice) {
@@ -743,10 +765,150 @@ export class Game extends Scene {
     this._objects.sort((a, b) => a.depth - b.depth);
   }
 
-  setSeek(value: number) {
+  setSeek(value: number, options: { preserveJudgments?: boolean; preserveReplay?: boolean; preserveUntil?: number } = {}) {
     this._isSeeking = true;
     this._clock.setSeek(value);
     this._videos?.forEach((video) => video.setSeek(value));
+    if (options.preserveJudgments) {
+      this._preserveJudgmentsUntil = options.preserveUntil ?? this._preserveJudgmentsUntil ?? this.timeSec;
+    }
+    if (this._data.replay && !options.preserveReplay) {
+      // 回放拖动进度后，从目标时间重新寻找事件，避免继续使用旧游玩位置的游标。
+      this._replayIndex = this._data.replay.events.findIndex((event) => event.t >= value);
+      if (this._replayIndex < 0) this._replayIndex = this._data.replay.events.length;
+    }
+  }
+
+  /**
+   * 暂停后继续：不显示 3 秒倒计时，而是把音频/谱面回退 3 秒后立即播放。
+   * 回退区间内已经打过或已经 Miss 的 note 保持原判定状态，不会重新出现。
+   */
+  /** 回退后立即播放，Player 只负责在画面上显示 3/2/1 倒计时。 */
+  async resumeWithRewind(seconds = 3) {
+    if (this._status !== GameStatus.PAUSED || !this._song) return;
+    const pauseTime = this.timeSec;
+    const target = Math.max(0, pauseTime - seconds);
+    this._preserveJudgmentsUntil = pauseTime;
+    this.setSeek(target, { preserveJudgments: true, preserveUntil: pauseTime, preserveReplay: !!this._data.replay });
+    this._status = GameStatus.PLAYING;
+    await this._clock.resume();
+    this._videos?.forEach((video) => video.resume());
+    EventBus.emit('started');
+  }
+
+  /** 原子取消当前快进，供用户在追赶期间再次拖动。 */
+  cancelFastForward(): boolean {
+    if (this._fastForwardTarget === null) return false;
+    this._fastForwardToken++;
+    this._fastForwardTarget = null;
+    this.timeScale = this._data.preferences.timeScale;
+    this._clock.pause();
+    this._videos?.forEach((video) => video.pause());
+    this._status = GameStatus.PAUSED;
+    const resolve = this._fastForwardResolve;
+    this._fastForwardResolve = null;
+    resolve?.();
+    EventBus.emit('paused', true);
+    return true;
+  }
+
+  /**
+   * 自动游玩/回放专用的进度跳转。
+   *
+   * 不能像普通游玩一样直接 setSeek：那会跳过中间所有 update，
+   * AT 的自动判定、回放输入、Miss 统计和连击都不会发生，导致结算不完整。
+   * 向前拖动时临时提高播放速率，让 Phaser 逐帧跑过目标位置；向后拖动
+   * 则直接跳转（回退本来就需要重置判定窗口）。
+   */
+  async fastForwardTo(value: number, resumeAfter = false): Promise<void> {
+    if (!this._song) return;
+    const target = Math.min(Math.max(value, 0), Math.max(0, this._song.duration - 0.02));
+    const current = this.timeSec;
+    this.cancelFastForward();
+    const token = ++this._fastForwardToken;
+
+    if (target <= current + 0.01) {
+      this._clock.pause();
+      this.setSeek(target);
+      this.timeScale = this._data.preferences.timeScale;
+      if (resumeAfter) {
+        this._status = GameStatus.PLAYING;
+        await this._clock.resume();
+        this._videos?.forEach((video) => video.resume());
+        EventBus.emit('started');
+      } else {
+        this._status = GameStatus.PAUSED;
+      }
+      return;
+    }
+
+    this._fastForwardTarget = target;
+    this._fastForwardSimTime = current;
+    this._fastForwardResumeAfter = resumeAfter;
+    this._fastForwardGameTime = performance.now();
+    this._status = GameStatus.PLAYING;
+
+    // 声音直接跳到目标位置，并按原速继续；谱面在 updateFastForward 中从旧位置追赶。
+    this._clock.pause();
+    this._clock.setSeek(target);
+    this._videos?.forEach((video) => video.setSeek(target));
+    this.timeScale = this._data.preferences.timeScale;
+    await this._clock.resume();
+    this._videos?.forEach((video) => video.resume());
+    EventBus.emit('started');
+    await new Promise<void>((resolve) => {
+      this._fastForwardResolve = resolve;
+      if (token !== this._fastForwardToken) {
+        this._fastForwardResolve = null;
+        resolve();
+      }
+    });
+  }
+
+  /**
+   * 声音已经在目标位置正常播放；谱面以 8× 速度从旧位置追赶当前声音时间，
+   * 判定区间拆成 20ms 子步进，避免 AT/回放/统计漏帧。
+   */
+  private updateFastForward(currentMediaTime: number, delta: number) {
+    const target = this._fastForwardTarget;
+    if (target === null) return;
+    const chaseLimit = this._fastForwardSimTime + Math.max(delta, 1) / 1000 * 8;
+    const finalTime = Math.min(currentMediaTime, chaseLimit);
+    const step = 0.02;
+    while (this._fastForwardSimTime + step < finalTime) {
+      this._fastForwardSimTime += step;
+      this._clock.setTime(this._fastForwardSimTime);
+      this.updateReplay();
+      const songTime = this.timeSec;
+      const beat = this.getBeat(songTime);
+      this.updateChart(beat, songTime, ++this._fastForwardGameTime);
+      this._judgmentHandler.update(beat);
+      this.statistics.updateDisplay(20);
+      EventBus.emit('update', songTime);
+    }
+    this._fastForwardSimTime = finalTime;
+    // 本帧其余渲染与 UI 都使用谱面的模拟时间，不要直接跳到声音时间。
+    this._clock.setTime(finalTime);
+    if (finalTime < target || currentMediaTime - finalTime > step) return;
+
+    this._fastForwardTarget = null;
+    this._clock.setTime(currentMediaTime);
+    const reachedEnd = currentMediaTime >= this._song.duration - 0.05;
+    const resolve = this._fastForwardResolve;
+    this._fastForwardResolve = null;
+    if (reachedEnd) {
+      this._status = GameStatus.PLAYING;
+    } else if (!this._fastForwardResumeAfter) {
+      this._clock.pause();
+      this._videos?.forEach((video) => video.pause());
+      this._status = GameStatus.PAUSED;
+    } else {
+      this._status = GameStatus.PLAYING;
+      EventBus.emit('started');
+    }
+    resolve?.();
+    // 媒体 complete 可能在快进保护期间已经触发并被 end() 忽略，尾端需要主动结算。
+    if (reachedEnd) this.end();
   }
 
   /* ---------------- 练习模式：A/B 点循环 ---------------- */
@@ -810,6 +972,12 @@ export class Game extends Scene {
     }
     if (!this._render) {
       this._clock.update();
+      if (this._preserveJudgmentsUntil !== null && this.timeSec >= this._preserveJudgmentsUntil) {
+        this._preserveJudgmentsUntil = null;
+      }
+      const currentMediaTime = this._clock.seek;
+      this.updateFastForward(currentMediaTime, delta);
+      if (!this.fastForwarding) this.updateReplay();
       // 练习模式的 A/B 循环：紧跟时钟推进判断，越过 B 点即跳回 A 点
       this.applyPracticeLoop();
       // 失败演出：把播放速率逐帧降到 0
@@ -825,9 +993,13 @@ export class Game extends Scene {
     }
     const realTimeSec = this.realTimeSec;
     this.report(time, realTimeSec);
-    this.updateChart(this.beat, this.timeSec, time);
-    this._judgmentHandler.update(this.beat);
-    this.statistics.updateDisplay(delta);
+    // 快进追赶期间 updateFastForward 已经完整执行过谱面/判定子步进，
+    // 不要再用同一模拟时间重复更新一次。
+    if (!this.fastForwarding) {
+      this.updateChart(this.beat, this.timeSec, time);
+      this._judgmentHandler.update(this.beat);
+      this.statistics.updateDisplay(delta);
+    }
     if (this._isSeeking) {
       this._status = status;
       this._isSeeking = false;
@@ -1075,6 +1247,19 @@ export class Game extends Scene {
     }
     this._judgmentHandler = new JudgmentHandler(this);
     this._statisticsHandler = new StatisticsHandler(this);
+  }
+
+  private updateReplay() {
+    const replay = this._data.replay;
+    if (!replay) return;
+    while (this._replayIndex < replay.events.length && replay.events[this._replayIndex].t <= this.timeSec + 0.003) {
+      const event = replay.events[this._replayIndex++];
+      if (event.type === 'pointerdown') this._pointerHandler?.replayDown(event.id, event.x, event.y);
+      else if (event.type === 'pointermove') this._pointerHandler?.replayMove(event.id, event.x, event.y, event.vx, event.vy);
+      else if (event.type === 'pointerup') this._pointerHandler?.replayUp(event.id);
+      else if (event.type === 'keydown') this._keyboardHandler?.replayDown(event.key);
+      else if (event.type === 'keyup') this._keyboardHandler?.replayUp(event.key);
+    }
   }
 
   setupUI() {

@@ -122,7 +122,7 @@ export class PlainNote extends SkewImage {
       this.setAlpha(this._alpha);
     }
     this.resize(chartDist);
-    if (this._beatJudged && beat < this._beatJudged) {
+    if (this._beatJudged && beat < this._beatJudged && !this._scene.preserveJudgments) {
       this._scene.judgment.unjudge(this);
     }
     if (this._judgmentType !== JudgmentType.BAD) {

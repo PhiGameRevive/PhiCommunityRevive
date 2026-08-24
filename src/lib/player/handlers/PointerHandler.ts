@@ -10,6 +10,7 @@ import type { PlainNote } from '../objects/PlainNote';
 import type { Game } from '../scenes/Game';
 import { GameStatus, type PointerDrag } from '$lib/types';
 import { getJudgmentPosition } from '../utils';
+import { EventBus } from '../EventBus';
 
 export class PointerHandler {
   private _scene: Game;
@@ -24,12 +25,14 @@ export class PointerHandler {
 
   updateTap(pointer: Input.Pointer) {
     if (
+      this._scene.replay ||
       this._scene.autoplay ||
       this._scene.status !== GameStatus.PLAYING ||
       this._scene.gameUI.pause.isInvocable(pointer.x, pointer.y)
     )
       return;
     const position = new Math.Vector2(pointer.x, pointer.y);
+    EventBus.emit('replay-input', { t: this._scene.timeSec, type: 'pointerdown', id: pointer.id, x: pointer.x / this._scene.sys.canvas.width, y: pointer.y / this._scene.sys.canvas.height });
     const tap = {
       id: pointer.id,
       time: this._scene.timeSec,
@@ -61,7 +64,7 @@ export class PointerHandler {
   }
 
   updateMove(pointer: Input.Pointer) {
-    if (this._scene.autoplay || this._scene.status !== GameStatus.PLAYING) return;
+    if (this._scene.replay || this._scene.autoplay || this._scene.status !== GameStatus.PLAYING) return;
     const index = this._pointerDrags.findIndex((input) => input.id === pointer.id);
     if (index === -1) {
       return;
@@ -74,6 +77,15 @@ export class PointerHandler {
       )
       .length();
     velocity.normalize();
+    EventBus.emit('replay-input', {
+      t: this._scene.timeSec,
+      type: 'pointermove',
+      id: pointer.id,
+      x: pointer.x / this._scene.sys.canvas.width,
+      y: pointer.y / this._scene.sys.canvas.height,
+      vx: velocity.x,
+      vy: velocity.y,
+    });
     this._pointerDrags[index].time = this._scene.timeSec;
     this._pointerDrags[index].position = position;
     this._pointerDrags[index].velocity =
@@ -148,7 +160,7 @@ export class PointerHandler {
   }
 
   removePointer(pointer: Input.Pointer) {
-    if (this._scene.autoplay || this._scene.status !== GameStatus.PLAYING) return;
+    if (this._scene.replay || this._scene.autoplay || this._scene.status !== GameStatus.PLAYING) return;
     // this._scene.tweens.add({
     //   targets: [
     //     this._scene.add.circle(pointer.position.x, pointer.position.y, 36, 0x2f628c).setDepth(100),
@@ -163,12 +175,32 @@ export class PointerHandler {
     //   ease: 'Cubic.easeIn',
     //   duration: 200,
     // });
+    EventBus.emit('replay-input', { t: this._scene.timeSec, type: 'pointerup', id: pointer.id, x: pointer.x / this._scene.sys.canvas.width, y: pointer.y / this._scene.sys.canvas.height });
     this._pointerDrags = this._pointerDrags.filter((input) => input.id !== pointer.id);
   }
 
   consumeDrag(id: number) {
     const index = this._pointerDrags.findIndex((input) => input.id === id);
     this._pointerDrags[index].velocityConsumed = this._pointerDrags[index].velocity.clone();
+  }
+
+  replayDown(id: number, x: number, y: number) {
+    const position = new Math.Vector2(x * this._scene.sys.canvas.width, y * this._scene.sys.canvas.height);
+    this._pointerDrags.push({ id, time: this._scene.timeSec, position, velocity: Math.Vector2.ZERO, velocityConsumed: null, distance: Infinity });
+    this._scene.judgment.judgeTap({ id, time: this._scene.timeSec, position, distance: Infinity, spaceTimeDistance: Infinity });
+  }
+
+  replayUp(id: number) {
+    this._pointerDrags = this._pointerDrags.filter((input) => input.id !== id);
+  }
+
+  replayMove(id: number, x: number, y: number, vx = 0, vy = 0) {
+    const input = this._pointerDrags.find((value) => value.id === id);
+    if (!input) return;
+    input.time = this._scene.timeSec;
+    input.position.set(x * this._scene.sys.canvas.width, y * this._scene.sys.canvas.height);
+    input.velocity.set(vx, vy);
+    input.velocityConsumed = null;
   }
 
   public get pointerDrags() {

@@ -18,12 +18,14 @@
   let playerName = '';
   let uiScale = DEFAULT_UI_SCALE;
   let introStyle: IntroStyle = 'new';
+  let persistentSeekBar = false;
 
   onMount(() => {
     prefs = loadPreferences();
     playerName = localStorage.getItem('playerName') ?? 'GUEST';
     uiScale = loadUiScale();
     introStyle = loadIntroStyle();
+    persistentSeekBar = localStorage.getItem('persistentSeekBar') === 'true';
     // AutoPlay 已迁移为选歌页的 AT 模组；清理旧开关，避免残留值造成困惑
     localStorage.removeItem('autoplay');
   });
@@ -41,6 +43,11 @@
   const updateIntroStyle = (style: IntroStyle) => {
     introStyle = style;
     saveIntroStyle(style);
+  };
+
+  const updatePersistentSeekBar = (value: boolean) => {
+    persistentSeekBar = value;
+    localStorage.setItem('persistentSeekBar', String(value));
   };
 
   const leaveSettings = () => {
@@ -141,6 +148,15 @@
         <option value="new">新版</option>
         <option value="legacy">旧版</option>
       </select>
+    </div>
+    <div class="row">
+      <span class="label">AT / 回放常驻进度条</span>
+      <button
+        class="toggle"
+        class:on={persistentSeekBar}
+        onclick={() => updatePersistentSeekBar(!persistentSeekBar)}
+        aria-label="AT / 回放常驻进度条"
+      ></button>
     </div>
     <div class="row">
       <span class="label">按键缩放</span>

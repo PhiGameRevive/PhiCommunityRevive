@@ -25,6 +25,48 @@ export interface Config {
   automate: boolean;
   /** 音乐本身是视频文件（mp4 等）→ 使用 HTML5 Audio 播放（WebAudio 无法解码视频容器） */
   songIsVideo?: boolean;
+  /** 回放查看：存在时禁用真实输入，并按时间轴注入已记录的输入事件 */
+  replay?: ReplayFile;
+}
+
+export type ReplayInputEvent =
+  | { t: number; type: 'pointerdown' | 'pointermove' | 'pointerup'; id: number; x: number; y: number; vx?: number; vy?: number }
+  | { t: number; type: 'keydown' | 'keyup'; key: string };
+
+export interface ReplaySourceSnapshot {
+  source: 'phi' | 'ptc' | 'pz' | 'local';
+  codename: string;
+  name: string;
+  artist: string;
+  illustrationUrl: string;
+  songUrl: string;
+  levels: Partial<Record<'ez' | 'hd' | 'in' | 'at' | 'sp', { chart: string; rank?: number; charter?: string; levelName?: string }>>;
+  chartId?: string;
+  backgroundAnimation?: string;
+  songIsVideo?: boolean;
+}
+
+/** 可下载/导入的 PhiCommunity 回放文件（.phireplay，JSON） */
+export interface ReplayFile {
+  format: 'PhiCommunityReplay';
+  version: 1;
+  id: string;
+  createdAt: number;
+  source: ReplaySourceSnapshot;
+  level: 'ez' | 'hd' | 'in' | 'at' | 'sp';
+  mods: string[];
+  duration: number;
+  events: ReplayInputEvent[];
+  result: {
+    score: number;
+    accuracy: number;
+    maxCombo: number;
+    perfect: number;
+    goodEarly: number;
+    goodLate: number;
+    bad: number;
+    miss: number;
+  };
 }
 
 export interface Resources {
@@ -73,10 +115,9 @@ export interface Preferences {
   perfectJudgment: number;
   simultaneousNoteHint: boolean;
   timeScale: number;
-  /** 以视频作为游玩背景（BGA） */
   useVideoBackground: boolean;
-  /** 视频背景不透明度（0-1） */
   videoBackgroundAlpha: number;
+  persistentSeekBar: boolean;
 }
 
 export interface MediaOptions {

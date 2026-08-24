@@ -111,7 +111,7 @@ export class GameUI {
       0.5,
       0,
       10,
-      COMBO_TEXT,
+      scene.replay ? 'REPLAY' : scene.autoplay ? 'AUTOPLAY' : scene.practice ? 'PRACTICE' : COMBO_TEXT,
       scene.p(this._fontSizes[2]),
     );
 

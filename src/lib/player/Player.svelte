@@ -42,6 +42,9 @@
   let allowSeek = false;
   let progressBarHeld = false;
   let pausedByBar = false;
+  let fastSeeking = false;
+  let seekTarget = 0;
+  let persistentSeekBar = false;
   let countdown = 0;
   let counter: ReturnType<typeof setInterval> | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -93,6 +96,8 @@
   };
 
   onMount(async () => {
+    // AT/回放常驻进度条默认关闭，玩家可在设置中主动开启
+    persistentSeekBar = localStorage.getItem('persistentSeekBar') === 'true';
     if (!config) return;
     gameRef.game = await start('player', config);
     timeout = setTimeout(() => {
@@ -117,7 +122,7 @@
       status = scene.status;
       duration = scene.song.duration;
       showStart = showAudioStart || (!config?.autostart && status === GameStatus.READY);
-      allowSeek = (scene.autoplay || scene.practice) && !scene.render;
+      allowSeek = (scene.autoplay || scene.practice || !!scene.replay) && !scene.render;
       practice = scene.practice && !scene.render;
       const metadata = scene.metadata;
       title = metadata.title;
@@ -194,16 +199,21 @@
     setTimeout(() => {
       showPause = false;
     }, 500);
-    status = GameStatus.PLAYING;
     if (gameRef.scene?.autoplay) {
+      status = GameStatus.PLAYING;
       gameRef.scene?.resume();
     } else {
+      // 普通游玩/回放/练习：回退 3 秒后立即播放，显示 3/2/1 作为视觉提示。
+      // 已判定或已 Miss 的 note 在回退区间内保持原状态，不会重新出现。
+      status = GameStatus.PLAYING;
+      void gameRef.scene?.resumeWithRewind(3);
       countdown = 3;
+      clearInterval(counter);
       counter = setInterval(() => {
         countdown--;
-        if (countdown === 0) {
+        if (countdown <= 0) {
           clearInterval(counter);
-          gameRef.scene?.resume();
+          countdown = 0;
         }
       }, 1000);
     }
@@ -216,6 +226,22 @@
     failing = false;
     status = GameStatus.LOADING;
     gameRef.scene?.restart();
+  };
+
+  const isFastSeekMode = () => !!gameRef.scene && (gameRef.scene.autoplay || !!gameRef.scene.replay);
+
+  const beginSeek = () => {
+    if (!isFastSeekMode() || status !== GameStatus.PLAYING) return;
+    fastSeeking = true;
+    seekTarget = timeSec;
+    if (!gameRef.scene?.cancelFastForward()) gameRef.scene?.pause(true);
+  };
+
+  const finishSeek = () => {
+    if (!fastSeeking) return;
+    fastSeeking = false;
+    pausedByBar = false;
+    void gameRef.scene?.fastForwardTo(seekTarget, true);
   };
 </script>
 
@@ -333,8 +359,8 @@
 {#if allowSeek}
   <div
     class="seek-bar"
-    class:seek-bar-visible={keyboardSeeking || showPause}
-    class:seek-bar-passive={!keyboardSeeking && !showPause}
+    class:seek-bar-visible={keyboardSeeking || showPause || (persistentSeekBar && isFastSeekMode())}
+    class:seek-bar-passive={!keyboardSeeking && !showPause && !(persistentSeekBar && isFastSeekMode())}
   >
     <span class="seek-time">{convertTime(timeSec, true)}</span>
     <input
@@ -343,7 +369,7 @@
       max={duration}
       value={timeSec}
       step="0.001"
-      disabled={(!keyboardSeeking && !showPause) ||
+      disabled={(!keyboardSeeking && !showPause && !isFastSeekMode()) ||
         status === GameStatus.LOADING ||
         status === GameStatus.READY ||
         status === GameStatus.PLAYING ||
@@ -352,6 +378,7 @@
         timeSec === duration}
       onpointerdown={() => {
         progressBarHeld = true;
+        beginSeek();
         if (!keyboardSeeking && !showPause) {
           pausedByBar = true;
           gameRef.scene?.pause(true);
@@ -359,13 +386,16 @@
       }}
       onpointerup={() => {
         progressBarHeld = false;
-        if (pausedByBar) {
+        if (fastSeeking) {
+          finishSeek();
+        } else if (pausedByBar) {
           pausedByBar = false;
           gameRef.scene?.resume();
         }
       }}
       oninput={(e) => {
-        gameRef.scene?.setSeek(Math.max(0, parseFloat(e.currentTarget.value)));
+        seekTarget = Math.max(0, parseFloat(e.currentTarget.value));
+    if (!fastSeeking) gameRef.scene?.setSeek(seekTarget);
       }}
     />
     <span class="seek-time seek-time-right">{convertTime(duration, true)}</span>

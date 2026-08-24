@@ -8,6 +8,7 @@ import { GameStatus } from '$lib/types';
 import type { PlainNote } from '../objects/PlainNote';
 import type { LongNote } from '../objects/LongNote';
 import { KEYBOARD_INPUT_REGEX } from '../constants';
+import { EventBus } from '../EventBus';
 
 export class KeyboardHandler {
   private _scene: Game;
@@ -18,7 +19,8 @@ export class KeyboardHandler {
   constructor(scene: Game) {
     this._scene = scene;
 
-    if (this._scene.autoplay || this._scene.practice) {
+
+    if (this._scene.autoplay || this._scene.practice || this._scene.replay) {
       this._scene.input.keyboard?.on('keydown-SPACE', this.handleSpaceDown, this);
       this._scene.input.keyboard?.on('keydown-LEFT', this.handleLeftArrowDown, this);
       this._scene.input.keyboard?.on('keydown-RIGHT', this.handleRightArrowDown, this);
@@ -45,8 +47,9 @@ export class KeyboardHandler {
     if (!KEYBOARD_INPUT_REGEX.test(e.key)) {
       return;
     }
-    if (this._scene.autoplay || this._scene.status !== GameStatus.PLAYING) return;
+    if (this._scene.replay || this._scene.autoplay || this._scene.status !== GameStatus.PLAYING) return;
     this._keysDown.add(e.key);
+    EventBus.emit('replay-input', { t: this._scene.timeSec, type: 'keydown', key: e.key });
     console.debug('+', e.key, this._keysDown);
     this._scene.judgment.judgeTap();
   }
@@ -58,8 +61,9 @@ export class KeyboardHandler {
     if (!KEYBOARD_INPUT_REGEX.test(e.key)) {
       return;
     }
-    if (this._scene.autoplay || this._scene.status !== GameStatus.PLAYING) return;
+    if (this._scene.replay || this._scene.autoplay || this._scene.status !== GameStatus.PLAYING) return;
     this._keysDown.delete(e.key);
+    EventBus.emit('replay-input', { t: this._scene.timeSec, type: 'keyup', key: e.key });
     console.debug('-', e.key, this._keysDown);
   }
 
@@ -108,5 +112,15 @@ export class KeyboardHandler {
     } else if (this._scene.status === GameStatus.PAUSED) {
       this._scene.resume();
     }
+  }
+
+  replayDown(key: string) {
+    if (this._keysDown.has(key)) return;
+    this._keysDown.add(key);
+    this._scene.judgment.judgeTap();
+  }
+
+  replayUp(key: string) {
+    this._keysDown.delete(key);
   }
 }

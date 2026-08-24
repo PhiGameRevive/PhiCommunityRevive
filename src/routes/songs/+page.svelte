@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { fly } from 'svelte/transition';
   import { goto } from '$app/navigation';
-  import { getResult, getAllResults, getAllLocalCharts, type LocalChart } from '$lib/db';
+  import { getResult, getAllResults, getAllReplays, getAllLocalCharts, saveReplay, deleteReplay, type LocalChart } from '$lib/db';
   import { getRank, type Level, type Rank } from '$lib/meta';
   import { fetchSongs, SOURCE_LABELS, type ChartSourceId, type SourceSong } from '$lib/sources';
   import { fetchPzCharts, fetchPzChartFile, getToken, login, setToken, PZ_LEVEL_TYPE } from '$lib/phizone';
@@ -18,6 +18,7 @@
     applyModsToPreferences,
     getModifiedRank,
     getScoreMultiplier,
+    isRecordable,
     loadMods,
     saveMods,
     toggleMod,
@@ -25,6 +26,8 @@
   } from '$lib/mods';
   import PhigrosLoading from '$lib/components/PhigrosLoading.svelte';
   import { randomTip } from '$lib/loadingTips';
+  import { downloadReplay, readReplayFile } from '$lib/replay';
+  import type { ReplayFile } from '$lib/types';
 
   const LEVELS: Level[] = ['ez', 'hd', 'in', 'at', 'sp'];
   const LEVEL_LABELS: Record<Level, string> = {
@@ -55,6 +58,9 @@
   let songsBySource: Record<ChartSourceId, SongItem[]> = { phi: [], ptc: [], pz: [] };
   let localSongs: SongItem[] = [];
   let activeSource: ChartSourceId | 'local' = 'phi';
+  let showRecords = false;
+  let records: import('$lib/db').PlayResult[] = [];
+  let replays: ReplayFile[] = [];
   let error = '';
   let loaded = false;
   let pzLoggedIn = false;
@@ -79,6 +85,33 @@
 
   const clearMods = () => {
     mods = saveMods([]);
+  };
+
+  const importReplay = async (event: Event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const replay = await readReplayFile(file);
+      if (!isRecordable(replay.mods as ModId[])) {
+        throw new Error('AT 自动游玩或 PR 练习模式不生成游玩记录');
+      }
+      await saveReplay(replay);
+      replays = [replay, ...replays.filter((r) => r.id !== replay.id)];
+    } catch (e) {
+      await alertModal(e instanceof Error ? e.message : '回放导入失败');
+    }
+    input.value = '';
+  };
+
+  const viewReplay = (replay: ReplayFile) => {
+    sessionStorage.setItem('pendingReplay', JSON.stringify(replay));
+    void goto(`/play/${encodeURIComponent(replay.source.codename)}/${replay.level}?replay=1`);
+  };
+
+  const removeReplay = async (id: string) => {
+    await deleteReplay(id);
+    replays = replays.filter((r) => r.id !== id);
   };
 
   /** 当前难度经模组修正后的定数（用于选歌页展示，与 RKS 计算一致） */
@@ -497,6 +530,12 @@
     pzLoggedIn = !!getToken();
     // 模组选择跨会话保留（跳转/重启后仍生效）
     mods = loadMods();
+    [records, replays] = await Promise.all([getAllResults(), getAllReplays()])
+      .then(([resultList, replayList]): [typeof records, typeof replays] => [
+        resultList,
+        replayList.filter((replay) => isRecordable(replay.mods as ModId[])),
+      ])
+      .catch((): [typeof records, typeof replays] => [[], []]);
     // 进入加载界面即随机选一张歌曲封面并固定显示（与开场页一致，不轮播）：
     // 优先用开场页预载的列表，直接访问/刷新时用上次缓存的封面池
     coverPool = loadCoverPool();
@@ -588,14 +627,20 @@
       const all = await getAllResults();
       rks = all.reduce((max, r) => Math.max(max, r.rankingScore), 0);
 
-      // 自动选择最低可玩难度
-      const first = currentList()[0];
-      if (first) {
-        const lp = LEVELS.find((l) => first.levels[l]);
+      // 首次进入选歌页时从三个在线谱面源随机挑一首，避免每次固定落在 PhiCommunity 第一首。
+      // 不包含 local：本地谱面只属于当前设备，不应影响在线曲库的随机性。
+      const onlinePool = [...songsBySource.phi, ...songsBySource.ptc, ...songsBySource.pz];
+      const randomSong = onlinePool[Math.floor(Math.random() * onlinePool.length)];
+      if (randomSong) {
+        // 在线池只由 phi/ptc/pz 组成，随机结果不可能落到 local
+        const source = randomSong.source as ChartSourceId;
+        activeSource = source;
+        current = songsBySource[source].findIndex((item) => item.codename === randomSong.codename);
+        const lp = LEVELS.find((l) => randomSong.levels[l]);
         if (lp) level = lp;
       }
       loaded = true;
-      playPreview(currentList()[0] ?? null);
+      playPreview(randomSong ?? currentList()[0] ?? null);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       loaded = true;
@@ -912,6 +957,9 @@
         >
           本地 ({localSongs.length})
         </button>
+        <button class="source-tab" class:active={showRecords} onclick={() => (showRecords = !showRecords)}>
+          游玩记录 ({records.length})
+        </button>
       </div>
       <div class="top-actions">
         <div class="preview-player">
@@ -1004,6 +1052,58 @@
         <button class="icon-btn list-btn" onclick={() => (showOverview = true)} aria-label="谱面总览"></button>
       </div>
     </div>
+
+    {#if showRecords}
+      <div class="records-overlay">
+        <div class="records-panel">
+          <div class="records-head">
+            <div>
+              <span class="records-label">PLAY HISTORY</span>
+              <h2>游玩记录</h2>
+            </div>
+            <label class="records-import">
+              导入回放
+              <input type="file" accept=".phireplay,.json,application/json" onchange={importReplay} />
+            </label>
+          </div>
+          {#if records.length > 0}
+            <div class="score-history">
+              <h3>成绩</h3>
+              {#each records as result}
+                {@const replay = replays.find((r) => `${r.source.codename}-${r.level}` === result.codename)}
+                <div class="score-history-item">
+                  <span>{result.codename}</span>
+                  <strong>{Math.round(result.score).toLocaleString()}</strong>
+                  <small>{(result.accuracy * 100).toFixed(2)}% · RKS {result.rankingScore.toFixed(2)}</small>
+                  {#if replay}<button onclick={() => viewReplay(replay)}>查看回放 (实验性)</button>{/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+          {#if replays.length === 0}
+            <p class="records-empty">还没有可查看的回放。完成一次游玩后，回放会自动保存。</p>
+          {:else}
+            <div class="records-list">
+              {#each replays as replay}
+                <article class="record-item">
+                  <div class="record-main">
+                    <strong>{replay.source.name}</strong>
+                    <span>{replay.level.toUpperCase()} · {new Date(replay.createdAt).toLocaleString()}</span>
+                    <small>成绩 {Math.round(replay.result.score).toLocaleString()} · {(replay.result.accuracy * 100).toFixed(2)}% · {replay.mods.join(' ') || '无模组'}</small>
+                  </div>
+                  <div class="record-actions">
+                    <button onclick={() => viewReplay(replay)}>查看 (实验性)</button>
+                    <button onclick={() => downloadReplay(replay)}>下载</button>
+                    <button onclick={() => removeReplay(replay.id)}>删除</button>
+                  </div>
+                </article>
+              {/each}
+            </div>
+          {/if}
+          <button class="records-close" onclick={() => (showRecords = false)}>关闭</button>
+        </div>
+      </div>
+    {/if}
 
     <!-- 主体：左列表 + 右详情 -->
     <div class="body">
@@ -1477,6 +1577,163 @@
     display: flex;
     align-items: center;
     gap: 10px;
+  }
+
+  .records-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 115;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(8px);
+  }
+
+  .records-panel {
+    width: min(760px, 100%);
+    max-height: min(780px, 90vh);
+    overflow-y: auto;
+    padding: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+    background: rgba(12, 12, 18, 0.96);
+  }
+
+  .records-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  }
+
+  .records-head h2 {
+    margin: 6px 0 0;
+  }
+
+  .records-label {
+    color: rgba(255, 255, 255, 0.42);
+    font: 700 0.62rem/1 var(--phi-mono);
+    letter-spacing: 0.2em;
+  }
+
+  .records-import,
+  .records-close,
+  .record-actions button {
+    padding: 8px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.38);
+    border-radius: 2px;
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+    font-size: 0.76rem;
+  }
+
+  .records-import input {
+    display: none;
+  }
+
+  .records-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 16px 0;
+  }
+
+  .score-history {
+    margin: 16px 0;
+  }
+
+  .score-history h3 {
+    margin: 0 0 8px;
+    color: rgba(255, 255, 255, 0.56);
+    font-size: 0.78rem;
+    letter-spacing: 0.14em;
+  }
+
+  .score-history-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    font-size: 0.74rem;
+  }
+
+  .score-history-item span,
+  .score-history-item small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: rgba(255, 255, 255, 0.56);
+  }
+
+  .score-history-item button {
+    padding: 4px 8px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+    font-size: 0.68rem;
+  }
+
+  .record-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .record-main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .record-main strong,
+  .record-main span,
+  .record-main small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .record-main span,
+  .record-main small {
+    color: rgba(255, 255, 255, 0.52);
+    font-size: 0.72rem;
+  }
+
+  .record-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .record-actions button:hover,
+  .records-import:hover,
+  .records-close:hover {
+    background: #fff;
+    color: #0a0a0c;
+  }
+
+  .records-empty {
+    padding: 36px 0;
+    color: rgba(255, 255, 255, 0.48);
+    text-align: center;
+  }
+
+  .records-close {
+    width: 100%;
+    margin-top: 8px;
   }
 
   .preview-player {

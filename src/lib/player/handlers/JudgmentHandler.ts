@@ -178,7 +178,7 @@ export class JudgmentHandler {
   }
 
   createHitsound(note: PlainNote | LongNote) {
-    if (this._scene.render) return;
+    if (this._scene.render || this._scene.fastForwarding) return;
     const key = note.note.hitsound ? `asset-${note.note.hitsound}` : note.note.type.toString();
     // 某些浏览器可能无法解码单个 OGG/音频资源。不要让缺失的打击音效
     // 通过 Phaser SoundManager 抛异常并中断判定循环，静默跳过即可继续游玩。
