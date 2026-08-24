@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { page } from '$app/state';
   import { afterNavigate } from '$app/navigation';
   import { registerSW } from 'virtual:pwa-register';
   import '../app.css';
@@ -10,8 +9,6 @@
   let isMobile = false;
   let portrait = false;
   let isFullscreen = false;
-  // 根路径是开场动画页：竖屏旋转遮罩会盖住开场流程，等进选歌页再提示
-  const isIntro = () => page.url.pathname === '/';
 
   /**
    * 界面缩放作用在 <html> 上（等价于浏览器页面缩放），因此各页面的
@@ -81,8 +78,8 @@
   afterNavigate(applyScaleForRoute);
 </script>
 
-<!-- 手机竖屏：强制横屏提示（开场页除外） -->
-{#if isMobile && portrait && !isIntro()}
+<!-- 手机竖屏：每次启动（含开场流程）都提示横屏；旋转设备后自动消失 -->
+{#if isMobile && portrait}
   <div class="rotate-overlay">
     <div class="rotate-icon"></div>
     <p class="rotate-title">请横屏游玩</p>

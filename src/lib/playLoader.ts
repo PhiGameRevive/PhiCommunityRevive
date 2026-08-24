@@ -32,6 +32,7 @@ import {
 } from '$lib/chartArchive';
 import { fetchPzChartAssets } from '$lib/phizone';
 import { fetchSongs, type ChartSourceId } from '$lib/sources';
+import { applyModsToPreferences, isAutoplay, isPractice, loadMods, type ModId } from '$lib/mods';
 import type { Config, PhiraExtra, Preferences } from '$lib/types';
 import { clamp, inferLevelType } from '$lib/utils';
 
@@ -72,6 +73,8 @@ export interface PrepareOptions {
   onProgress?: (progress: number, detail: string) => void;
   /** 取消当前资源准备，供选歌页的取消按钮使用。 */
   signal?: AbortSignal;
+  /** 本次游玩启用的模组；不传时读取已保存的选择。 */
+  mods?: ModId[];
 }
 
 /* ---------------- 下载与进度 ---------------- */
@@ -483,6 +486,8 @@ const makeConfig = (params: {
   resources: Config['resources'];
   preferences: Preferences;
   songIsVideo: boolean;
+  /** 本次游玩启用的模组（AT 会开启引擎的 autoplay） */
+  mods: ModId[];
 }): Config => ({
   resources: params.resources,
   metadata: {
@@ -495,7 +500,8 @@ const makeConfig = (params: {
     level: params.levelName,
     difficulty: params.difficulty,
   },
-  preferences: params.preferences,
+  // 模组效果（判定窗口 / 倍速 / 翻转）在此叠加，不污染玩家保存的偏好
+  preferences: applyModsToPreferences(params.preferences, params.mods),
   mediaOptions: {
     frameRate: 60,
     overrideResolution: null,
@@ -506,8 +512,8 @@ const makeConfig = (params: {
     vsync: false,
   },
   resourcePack: DEFAULT_RESOURCE_PACK,
-  autoplay: localStorage.getItem('autoplay') === 'true',
-  practice: false,
+  autoplay: isAutoplay(params.mods),
+  practice: isPractice(params.mods),
   adjustOffset: false,
   render: false,
   autostart: true,
@@ -537,6 +543,7 @@ export const preparePlay = async (
     created.length = 0;
   };
   const progress = createProgress(options.onProgress);
+  const mods = options.mods ?? loadMods();
 
   try {
     if (source.source === 'local') {
@@ -569,6 +576,7 @@ export const preparePlay = async (
           resources: { song, chart, illustration: illustration ?? '/banner.png', ...bundle },
           preferences,
           songIsVideo: false,
+          mods,
         }),
         release,
       };
@@ -616,6 +624,7 @@ export const preparePlay = async (
           resources,
           preferences,
           songIsVideo,
+          mods,
         }),
         release,
       };
@@ -665,6 +674,7 @@ export const preparePlay = async (
         resources: { song, chart, illustration, ...bundle },
         preferences,
         songIsVideo: source.songIsVideo === true,
+        mods,
       }),
       release,
     };

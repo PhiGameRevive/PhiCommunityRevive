@@ -19,10 +19,13 @@
   } from '$lib/playLoader';
   import { parseSongId } from '$lib/sources';
   import { getLocalChart, LOCAL_PREFIX } from '$lib/db';
+  import { loadMods, isRecordable, type ModId } from '$lib/mods';
 
   const codename = page.params.codename ?? '';
   const level = (page.params.level ?? 'ez') as Level;
   const isLocal = codename.startsWith(LOCAL_PREFIX);
+  /** 本次游玩启用的模组（选歌页写入 localStorage，游玩页与结算共用同一份） */
+  const mods: ModId[] = loadMods();
 
   let config: Config | null = null;
   let error = '';
@@ -32,7 +35,14 @@
   let loadingCover = '/ui/ElementSqare.webp';
   let loadingTip = '';
 
-  const resultStore = writable({ isNewBest: false, rankingScore: 0, accuracy: 0 });
+  const resultStore = writable({
+    isNewBest: false,
+    rankingScore: 0,
+    accuracy: 0,
+    scoreMultiplier: 1,
+    recorded: true,
+    mods,
+  });
 
   let gameRef: {
     game: import('phaser').Game | null;
@@ -50,6 +60,7 @@
         loadingDetail = '下载谱面资源';
         prepared = await preparePlay(source, level, loadPreferences(), {
           preloadResources: source.source !== 'local',
+          mods,
           onProgress: (progress, detail) => {
             loadingProgress = progress;
             loadingDetail = detail;
@@ -80,13 +91,15 @@
     if (!scene) return;
     const stats = scene.statistics.stats;
     resultStore.update((r) => ({ ...r, accuracy: stats.accuracy }));
-    // autoplay 成绩不记录
-    const autoplay = localStorage.getItem('autoplay') === 'true';
-    if (autoplay) {
-      resultStore.update(() => ({
+    // AT（自动游玩）等倍率为 0 的模组不记录成绩；判断交给 recordPlayResult 内部统一处理
+    if (!isRecordable(mods)) {
+      resultStore.update((r) => ({
+        ...r,
         isNewBest: false,
         rankingScore: 0,
         accuracy: stats.accuracy,
+        scoreMultiplier: 0,
+        recorded: false,
       }));
       return;
     }
@@ -140,11 +153,14 @@
     };
     recordMeta()
       .then(async (meta) => {
-        const outcome = await recordPlayResult(meta, level, stats.score, stats.accuracy);
-        resultStore.update(() => ({
+        const outcome = await recordPlayResult(meta, level, stats.score, stats.accuracy, mods);
+        resultStore.update((r) => ({
+          ...r,
           isNewBest: outcome.isNewBest,
           rankingScore: outcome.rankingScore,
           accuracy: stats.accuracy,
+          scoreMultiplier: outcome.scoreMultiplier,
+          recorded: outcome.recorded,
         }));
       })
       .catch((e) => console.error('Failed to record result', e));

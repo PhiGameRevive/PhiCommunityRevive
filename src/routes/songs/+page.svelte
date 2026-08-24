@@ -11,6 +11,18 @@
   import { preparePlay, setPendingPlay, type PlaySource } from '$lib/playLoader';
   import { takePreloadedSongLists, peekPreloadedSongLists } from '$lib/preload';
   import { swPrecacheUrls } from '$lib/swPreload';
+  import {
+    MODS,
+    MOD_CATEGORY_LABELS,
+    MOD_CATEGORY_ORDER,
+    applyModsToPreferences,
+    getModifiedRank,
+    getScoreMultiplier,
+    loadMods,
+    saveMods,
+    toggleMod,
+    type ModId,
+  } from '$lib/mods';
   import PhigrosLoading from '$lib/components/PhigrosLoading.svelte';
   import { randomTip } from '$lib/loadingTips';
 
@@ -56,6 +68,25 @@
 
   let starting = false;
   let showOverview = false;
+
+  /* ---- 模组（Mods）：难度选择下方的 MOD 按钮打开分区面板 ---- */
+  let mods: ModId[] = [];
+  let showMods = false;
+
+  const onToggleMod = (id: ModId) => {
+    mods = saveMods(toggleMod(mods, id));
+  };
+
+  const clearMods = () => {
+    mods = saveMods([]);
+  };
+
+  /** 当前难度经模组修正后的定数（用于选歌页展示，与 RKS 计算一致） */
+  const displayRank = (rank: number | undefined): number | undefined => {
+    if (rank == null || rank <= 0) return rank;
+    return getModifiedRank(rank, mods);
+  };
+
   let loadProgress = 0;
   let loadDetail = '';
   let previewAudio: HTMLMediaElement | null = null;
@@ -373,7 +404,10 @@
   ) => {
     loadingPreferences = { ...loadingPreferences, [key]: value };
     savePreferences(loadingPreferences);
-    if (loadingPrepared) loadingPrepared.config.preferences = loadingPreferences;
+    // 必须重新叠加模组：直接写回原始偏好会抹掉判定窗口/倍速/翻转等模组效果
+    if (loadingPrepared) {
+      loadingPrepared.config.preferences = applyModsToPreferences(loadingPreferences, mods);
+    }
     resetReadyCountdown();
   };
 
@@ -461,6 +495,8 @@
   onMount(async () => {
     playerName = localStorage.getItem('playerName') ?? 'GUEST';
     pzLoggedIn = !!getToken();
+    // 模组选择跨会话保留（跳转/重启后仍生效）
+    mods = loadMods();
     // 进入加载界面即随机选一张歌曲封面并固定显示（与开场页一致，不轮播）：
     // 优先用开场页预载的列表，直接访问/刷新时用上次缓存的封面池
     coverPool = loadCoverPool();
@@ -700,6 +736,7 @@
     try {
       const prepared = await preparePlay(item as PlaySource, level, loadingPreferences, {
         preloadResources: item.source !== 'local',
+        mods,
         onProgress: (progress, detail) => {
           loadProgress = progress;
           loadDetail = detail;
@@ -711,7 +748,9 @@
         return;
       }
       loadingPrepared = prepared;
-      prepared.config.preferences = loadingPreferences;
+      // preparePlay 已把模组叠加进 config.preferences；这里重新叠加一遍，
+      // 保证与刚读取的 loadingPreferences 同步（直接赋值原始偏好会抹掉模组效果）
+      prepared.config.preferences = applyModsToPreferences(loadingPreferences, mods);
       rememberSong(item);
       loadProgress = 1;
       loadDetail = '准备完成，等待操作';
@@ -1035,10 +1074,12 @@
           <h1 class="detail-name">{s.name}</h1>
           <div class="detail-artist">{s.artist}</div>
 
-          <!-- legacy 难度选择样式 -->
+          <!-- legacy 难度选择样式；定数随模组修正（EZ/HT 降低、HR/DT 提高） -->
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <div class="level-chooser">
             {#each LEVELS as lv}
+              {@const raw = s.levels[lv]?.rank}
+              {@const shown = displayRank(raw)}
               <div
                 class="level-item {lv}"
                 class:selected={level === lv}
@@ -1049,10 +1090,34 @@
               >
                 <span class="level-txt">{s.levels[lv]?.levelName ?? LEVEL_LABELS[lv]}</span>
                 {#if s.levels[lv]}
-                  <span class="level-rank">Lv.{s.levels[lv]!.rank ?? '?'}</span>
+                  <span class="level-rank" class:rank-shifted={shown != null && raw != null && shown !== raw}>
+                    Lv.{shown ?? '?'}
+                  </span>
                 {/if}
               </div>
             {/each}
+          </div>
+
+          <!-- MOD 按钮：紧随难度选择之下，点击打开分区选择面板 -->
+          <div class="mod-entry">
+            <button class="mod-open-btn" class:active={mods.length > 0} onclick={() => (showMods = true)}>
+              <span class="mod-open-label">MOD</span>
+              {#if mods.length > 0}
+                <span class="mod-open-list">
+                  {#each mods as id}
+                    {@const def = MODS.find((m) => m.id === id)}
+                    {#if def}
+                      <span class="mod-open-chip {def.category}">{def.short}</span>
+                    {/if}
+                  {/each}
+                </span>
+                <span class="mod-open-mult" class:zero={getScoreMultiplier(mods) === 0}>
+                  {getScoreMultiplier(mods) === 0 ? '不计分' : `×${getScoreMultiplier(mods).toFixed(2)}`}
+                </span>
+              {:else}
+                <span class="mod-open-empty">无</span>
+              {/if}
+            </button>
           </div>
 
           <div class="detail-meta">
@@ -1191,6 +1256,71 @@
       </div>
     {/if}
   </div>
+
+  <!-- 模组选择面板：一列一个分区（降低难度 / 提升难度 / 特殊） -->
+  {#if showMods}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="mods-overlay" onclick={() => (showMods = false)}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="mods-panel" onclick={(e) => e.stopPropagation()}>
+        <div class="mods-head">
+          <div class="mods-head-text">
+            <span class="mods-label">MOD SELECT</span>
+            <h2 class="mods-title">模组</h2>
+          </div>
+          <span class="mods-multiplier" class:zero={getScoreMultiplier(mods) === 0}>
+            {#if getScoreMultiplier(mods) === 0}
+              成绩不记录
+            {:else}
+              分数倍率 ×{getScoreMultiplier(mods).toFixed(2)}
+            {/if}
+          </span>
+        </div>
+
+        <div class="mods-body">
+          {#each MOD_CATEGORY_ORDER as category}
+            {@const items = MODS.filter((m) => m.category === category)}
+            {#if items.length > 0}
+              <section class="mods-group {category}">
+                <h3 class="mods-group-title">{MOD_CATEGORY_LABELS[category]}</h3>
+                <div class="mods-group-items">
+                  {#each items as def}
+                    <button
+                      class="mod-card {category}"
+                      class:on={mods.includes(def.id)}
+                      onclick={() => onToggleMod(def.id)}
+                      aria-pressed={mods.includes(def.id)}
+                    >
+                      <span class="mod-card-short">{def.short}</span>
+                      <span class="mod-card-text">
+                        <strong>{def.name}</strong>
+                        <small>{def.description}</small>
+                      </span>
+                      <span class="mod-card-meta">
+                        {#if def.rankDelta !== 0}
+                          <em class="mod-card-rank">
+                            定数 {def.rankDelta > 0 ? '+' : ''}{def.rankDelta}
+                          </em>
+                        {/if}
+                        <em class="mod-card-mult">
+                          {def.scoreMultiplier === 0 ? '不计分' : `×${def.scoreMultiplier.toFixed(2)}`}
+                        </em>
+                      </span>
+                    </button>
+                  {/each}
+                </div>
+              </section>
+            {/if}
+          {/each}
+        </div>
+
+        <div class="mods-actions">
+          <button class="mods-clear" onclick={clearMods} disabled={mods.length === 0}>全部关闭</button>
+          <button class="mods-done" onclick={() => (showMods = false)}>完成</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <!-- 总览 -->
   {#if showOverview}
@@ -1976,6 +2106,104 @@
     line-height: 1.2;
   }
 
+  /* 定数被模组修正过：加下划虚线提示这不是原始定数 */
+  .level-rank.rank-shifted {
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+    opacity: 1;
+    font-weight: 700;
+  }
+
+  /* ---- MOD 入口按钮：紧随难度选择之下 ---- */
+  .mod-entry {
+    display: flex;
+    justify-content: center;
+    margin-top: 12px;
+  }
+
+  .mod-open-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 34px;
+    padding: 6px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.03);
+    color: #e8e8e8;
+    cursor: pointer;
+    transition:
+      background 0.16s ease,
+      border-color 0.16s ease;
+  }
+
+  .mod-open-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.6);
+    color: #fff;
+  }
+
+  .mod-open-btn.active {
+    border-color: rgba(255, 255, 255, 0.55);
+    background: rgba(255, 255, 255, 0.09);
+  }
+
+  .mod-open-label {
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+  }
+
+  .mod-open-empty {
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+  }
+
+  .mod-open-list {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* 入口按钮上的已启用缩写：降低难度偏冷色、提升难度偏暖色 */
+  .mod-open-chip {
+    padding: 2px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    border-radius: 2px;
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+  }
+
+  .mod-open-chip.reduction {
+    border-color: rgba(150, 210, 255, 0.8);
+    color: #bfe1ff;
+  }
+
+  .mod-open-chip.increase {
+    border-color: rgba(255, 180, 150, 0.8);
+    color: #ffd0bd;
+  }
+
+  .mod-open-chip.auto {
+    border-color: rgba(201, 176, 240, 0.8);
+    color: #ddccf7;
+  }
+
+  .mod-open-mult {
+    color: rgba(255, 255, 255, 0.55);
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.66rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .mod-open-mult.zero {
+    color: #ffb4b4;
+  }
+
   .detail-meta {
     display: flex;
     align-items: center;
@@ -2012,11 +2240,11 @@
     font-style: italic;
   }
 
-  /* 右下角开始按钮 */
+  /* 右下角开始按钮（底部避让全面屏手势区） */
   .play-btn {
     position: absolute;
-    right: 28px;
-    bottom: 28px;
+    right: calc(28px + env(safe-area-inset-right, 0px));
+    bottom: calc(28px + env(safe-area-inset-bottom, 0px));
     width: 64px;
     height: 64px;
     border-radius: 50%;
@@ -2248,7 +2476,7 @@
   .cancel-loading-btn {
     position: absolute;
     right: 42px;
-    bottom: 28px;
+    bottom: calc(28px + env(safe-area-inset-bottom, 0px));
     z-index: 81;
     padding: 7px 14px;
     border: 1px solid rgba(255, 255, 255, 0.42);
@@ -2443,6 +2671,305 @@
     50% {
       background-color: #1f1f26;
     }
+  }
+
+  /* ---- 模组选择面板：一列一个分区 ---- */
+  .mods-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.74);
+    backdrop-filter: blur(6px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 110;
+    animation: mods-fade 0.2s ease;
+  }
+
+  @keyframes mods-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  .mods-panel {
+    width: min(560px, 100%);
+    max-height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 22px clamp(16px, 3vw, 26px);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 3px;
+    background: rgba(12, 12, 18, 0.97);
+    animation: mods-in 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @keyframes mods-in {
+    from {
+      opacity: 0;
+      transform: translateY(12px) scale(0.99);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .mods-head {
+    flex-shrink: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+    padding-bottom: 13px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  }
+
+  .mods-head-text {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .mods-label {
+    color: rgba(255, 255, 255, 0.4);
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.24em;
+  }
+
+  .mods-title {
+    margin: 0;
+    font-size: 1.35rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+  }
+
+  .mods-multiplier {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 2px;
+    color: rgba(255, 255, 255, 0.8);
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+  }
+
+  .mods-multiplier.zero {
+    border-color: rgba(255, 160, 160, 0.6);
+    color: #ffb4b4;
+  }
+
+  /* 分区纵向排列，超出时面板内部滚动 */
+  .mods-body {
+    min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding-right: 2px;
+  }
+
+  .mods-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  /* 分区标题左侧色条：冷色=降低难度，暖色=提升难度 */
+  .mods-group-title {
+    margin: 0;
+    padding-left: 9px;
+    border-left: 3px solid rgba(255, 255, 255, 0.3);
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    line-height: 1.4;
+  }
+
+  .mods-group.reduction .mods-group-title {
+    border-left-color: #9fcdf0;
+    color: #9fcdf0;
+  }
+
+  .mods-group.increase .mods-group-title {
+    border-left-color: #f0b79f;
+    color: #f0b79f;
+  }
+
+  /* 自动曲：不计分的辅助模式，用紫色区分于增减难度 */
+  .mods-group.auto .mods-group-title {
+    border-left-color: #c9b0f0;
+    color: #c9b0f0;
+  }
+
+  .mods-group-items {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .mod-card {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.03);
+    color: #e8e8e8;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      background 0.15s ease,
+      border-color 0.15s ease;
+  }
+
+  .mod-card:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.45);
+    color: #fff;
+  }
+
+  .mod-card.on {
+    border-color: #fff;
+    background: rgba(255, 255, 255, 0.13);
+  }
+
+  .mod-card.on.reduction {
+    border-color: #9fcdf0;
+  }
+
+  .mod-card.on.increase {
+    border-color: #f0b79f;
+  }
+
+  .mod-card.on.auto {
+    border-color: #c9b0f0;
+  }
+
+  .mod-card-short {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 32px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 2px;
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+  }
+
+  .mod-card.on .mod-card-short {
+    background: #fff;
+    border-color: #fff;
+    color: #0a0a0c;
+  }
+
+  .mod-card.on.reduction .mod-card-short {
+    background: #bfe1ff;
+    border-color: #bfe1ff;
+  }
+
+  .mod-card.on.increase .mod-card-short {
+    background: #ffd0bd;
+    border-color: #ffd0bd;
+  }
+
+  .mod-card.on.auto .mod-card-short {
+    background: #ddccf7;
+    border-color: #ddccf7;
+  }
+
+  .mod-card-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .mod-card-text strong {
+    font-size: 0.86rem;
+    font-weight: 700;
+  }
+
+  .mod-card-text small {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.68rem;
+    line-height: 1.5;
+  }
+
+  .mod-card:hover .mod-card-text small {
+    color: rgba(255, 255, 255, 0.72);
+  }
+
+  .mod-card-meta {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.64rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .mod-card-rank {
+    color: rgba(255, 255, 255, 0.42);
+    font-style: normal;
+  }
+
+  .mod-card-mult {
+    color: rgba(255, 255, 255, 0.62);
+    font-style: normal;
+  }
+
+  .mods-actions {
+    flex-shrink: 0;
+    display: flex;
+    gap: 10px;
+    padding-top: 4px;
+  }
+
+  .mods-clear,
+  .mods-done {
+    flex: 1;
+    padding: 11px;
+    border-radius: 2px;
+    font-size: 0.88rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    cursor: pointer;
+  }
+
+  .mods-clear {
+    border: 1px solid rgba(255, 255, 255, 0.32);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  .mods-clear:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .mods-done {
+    border: 1px solid #fff;
+    background: #fff;
+    color: #0a0a0c;
   }
 
   /* ---- 总览 ---- */

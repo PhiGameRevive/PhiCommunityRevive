@@ -58,7 +58,7 @@
     pointer-events: none;
   }
 
-  /* 底部毛玻璃：左 Tip，右 LOADING */
+  /* 底部毛玻璃：左 Tip，右 LOADING（底部留出全面屏手势区） */
   .pl-glass {
     position: absolute;
     left: 0;
@@ -69,6 +69,7 @@
     justify-content: space-between;
     gap: 24px;
     padding: 14px 26px;
+    padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
     background: rgba(10, 10, 14, 0.36);
     backdrop-filter: blur(18px) saturate(1.5);
     -webkit-backdrop-filter: blur(18px) saturate(1.5);
@@ -93,6 +94,7 @@
     .pl-glass {
       gap: 14px;
       padding: 10px 12px;
+      padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
     }
 
     .pl-tip {

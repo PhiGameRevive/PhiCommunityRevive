@@ -15,17 +15,17 @@
   import { loadIntroStyle, saveIntroStyle, type IntroStyle } from '$lib/introStyle';
 
   let prefs: Preferences = { ...DEFAULT_PREFERENCES };
-  let autoplay = false;
   let playerName = '';
   let uiScale = DEFAULT_UI_SCALE;
   let introStyle: IntroStyle = 'new';
 
   onMount(() => {
     prefs = loadPreferences();
-    autoplay = localStorage.getItem('autoplay') === 'true';
     playerName = localStorage.getItem('playerName') ?? 'GUEST';
     uiScale = loadUiScale();
     introStyle = loadIntroStyle();
+    // AutoPlay 已迁移为选歌页的 AT 模组；清理旧开关，避免残留值造成困惑
+    localStorage.removeItem('autoplay');
   });
 
   const update = <K extends keyof Preferences>(key: K, value: Preferences[K]) => {
@@ -41,11 +41,6 @@
   const updateIntroStyle = (style: IntroStyle) => {
     introStyle = style;
     saveIntroStyle(style);
-  };
-
-  const updateAutoplay = (v: boolean) => {
-    autoplay = v;
-    localStorage.setItem('autoplay', String(v));
   };
 
   const leaveSettings = () => {
@@ -143,7 +138,7 @@
         value={introStyle}
         onchange={(e) => updateIntroStyle(e.currentTarget.value as IntroStyle)}
       >
-        <option value="new">新版（含花瓣）</option>
+        <option value="new">新版</option>
         <option value="legacy">旧版</option>
       </select>
     </div>
@@ -277,15 +272,6 @@
   <!-- 其他 -->
   <section class="group">
     <h2 class="group-title">其他</h2>
-    <div class="row">
-      <span class="label">AutoPlay</span>
-      <button
-        class="toggle"
-        class:on={autoplay}
-        onclick={() => updateAutoplay(!autoplay)}
-        aria-label="AutoPlay"
-      ></button>
-    </div>
     <div class="row">
       <span class="label">玩家昵称</span>
       <button

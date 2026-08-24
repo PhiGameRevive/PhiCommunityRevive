@@ -6,6 +6,7 @@
   import { GameStatus, type Config } from '$lib/types';
   import { clamp } from '$lib/utils';
   import { convertTime } from './utils';
+  import { getMod, type ModId } from '$lib/mods';
   import type { Game as GameScene } from './scenes/Game';
 
   export let config: Config | null = null;
@@ -18,6 +19,10 @@
   export let isNewBest = false;
   export let rankingScore = 0;
   export let accuracy = 0;
+  /** 本次启用的模组与分数倍率（结算面板展示用） */
+  export let mods: ModId[] = [];
+  export let scoreMultiplier = 1;
+  export let recorded = true;
 
   let loadingProgress = 0;
   let loadingDetail = '';
@@ -41,6 +46,35 @@
   let counter: ReturnType<typeof setInterval> | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let stillLoading = false;
+
+  /* ---- 练习模式：A/B 点循环 ---- */
+  let practice = false;
+  let loopA: number | null = null;
+  let loopB: number | null = null;
+
+  const setLoopA = () => {
+    const scene = gameRef.scene;
+    if (!scene) return;
+    scene.setLoopA(timeSec);
+    loopA = scene.loopA;
+    loopB = scene.loopB;
+  };
+
+  const setLoopB = () => {
+    const scene = gameRef.scene;
+    if (!scene) return;
+    scene.setLoopB(timeSec);
+    loopA = scene.loopA;
+    loopB = scene.loopB;
+  };
+
+  const clearLoop = () => {
+    const scene = gameRef.scene;
+    if (!scene) return;
+    scene.clearLoop();
+    loopA = null;
+    loopB = null;
+  };
 
   const handleContextMenu = (e: PointerEvent) => {
     e.preventDefault();
@@ -78,6 +112,7 @@
       duration = scene.song.duration;
       showStart = showAudioStart || (!config?.autostart && status === GameStatus.READY);
       allowSeek = (scene.autoplay || scene.practice) && !scene.render;
+      practice = scene.practice && !scene.render;
       const metadata = scene.metadata;
       title = metadata.title;
       level = metadata.level;
@@ -209,7 +244,39 @@
     </div>
   {:else if showPause}
     <div class="overlay-card">
-      <h2 class="pause-title">已暂停</h2>
+      <h2 class="pause-title" class:practice>{practice ? '练习模式 · 已暂停' : '已暂停'}</h2>
+
+      {#if practice}
+        <!-- A/B 点循环：设置两点后播放越过 B 会自动跳回 A -->
+        <div class="loop-panel">
+          <span class="loop-label">A / B 循环</span>
+          <div class="loop-rows">
+            <div class="loop-row">
+              <button class="btn btn-loop" onclick={setLoopA}>设 A 点</button>
+              <span class="loop-value" class:set={loopA !== null}>
+                {loopA === null ? '未设置' : convertTime(loopA, true)}
+              </span>
+            </div>
+            <div class="loop-row">
+              <button class="btn btn-loop" onclick={setLoopB}>设 B 点</button>
+              <span class="loop-value" class:set={loopB !== null}>
+                {loopB === null ? '未设置' : convertTime(loopB, true)}
+              </span>
+            </div>
+          </div>
+          <div class="loop-foot">
+            {#if loopA !== null && loopB !== null}
+              <span class="loop-active">循环中 · {convertTime(loopA, true)} → {convertTime(loopB, true)}</span>
+            {:else}
+              <span class="loop-hint">在当前进度设置 A、B 两点即开始循环</span>
+            {/if}
+            <button class="btn btn-loop" onclick={clearLoop} disabled={loopA === null && loopB === null}>
+              清除
+            </button>
+          </div>
+        </div>
+      {/if}
+
       <div class="pause-actions">
         <button class="btn btn-round" title="退出" onclick={exit}>✕</button>
         <button
@@ -280,6 +347,28 @@
       <div class="rks">RKS {rankingScore.toFixed(2)}</div>
     {/if}
     <div class="acc">{(accuracy * 100).toFixed(2)}%</div>
+    {#if mods.length > 0}
+      <div class="mods-row">
+        {#each mods as id}
+          {@const def = getMod(id)}
+          {#if def}
+            <span
+              class="mod-badge"
+              class:reduction={def.category === 'reduction'}
+              class:increase={def.category === 'increase'}
+              class:auto={def.category === 'auto'}
+            >
+              {def.short}
+            </span>
+          {/if}
+        {/each}
+        {#if !recorded}
+          <span class="mods-note">成绩不记录</span>
+        {:else if scoreMultiplier !== 1}
+          <span class="mods-note">分数 ×{scoreMultiplier.toFixed(2)}</span>
+        {/if}
+      </div>
+    {/if}
   </div>
   <div class="finished-actions">
     <button
@@ -378,6 +467,94 @@
     font-weight: bold;
     text-transform: uppercase;
     margin: 0;
+  }
+
+  /* 练习模式的标题更长（含"练习模式"前缀），缩小避免窄屏溢出 */
+  .pause-title.practice {
+    font-size: clamp(1.5rem, 5vw, 2.4rem);
+    letter-spacing: 0.04em;
+  }
+
+  /* ---- 练习模式：A/B 循环面板 ---- */
+  .loop-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: min(420px, 82vw);
+    padding: 14px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.42);
+    backdrop-filter: blur(8px);
+  }
+
+  .loop-label {
+    color: rgba(255, 255, 255, 0.5);
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+  }
+
+  .loop-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .loop-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .loop-value {
+    color: rgba(255, 255, 255, 0.42);
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.86rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .loop-value.set {
+    color: #fff;
+  }
+
+  .loop-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.14);
+  }
+
+  .loop-hint {
+    color: rgba(255, 255, 255, 0.38);
+    font-size: 0.72rem;
+  }
+
+  .loop-active {
+    color: #9fe0ac;
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.74rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .btn-loop {
+    flex-shrink: 0;
+    padding: 6px 14px;
+    border-width: 1px;
+    border-radius: 3px;
+    font-size: 0.8rem;
+  }
+
+  .btn-loop:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+
+  .btn-loop:disabled:hover {
+    background: transparent;
   }
 
   .pause-actions {
@@ -540,5 +717,54 @@
     background: rgba(0, 0, 0, 0.5);
     backdrop-filter: blur(8px);
     font-size: 1rem;
+  }
+
+  /* 结算面板的模组徽章 */
+  .mods-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 60vw;
+  }
+
+  .mod-badge {
+    padding: 3px 9px;
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    border-radius: 2px;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(8px);
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+  }
+
+  /* 降低难度偏冷色、提升难度偏暖色、自动曲偏紫，与选歌页的模组面板一致 */
+  .mod-badge.reduction {
+    border-color: rgba(150, 210, 255, 0.7);
+    color: #bfe1ff;
+  }
+
+  .mod-badge.increase {
+    border-color: rgba(255, 180, 150, 0.7);
+    color: #ffd0bd;
+  }
+
+  .mod-badge.auto {
+    border-color: rgba(201, 176, 240, 0.7);
+    color: #ddccf7;
+  }
+
+  .mods-note {
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(8px);
+    color: rgba(255, 255, 255, 0.75);
+    font-family: 'Courier New', ui-monospace, monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
   }
 </style>

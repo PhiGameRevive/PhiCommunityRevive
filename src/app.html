@@ -3,7 +3,10 @@
 	<head>
 		<meta charset="utf-8" />
 		<link rel="icon" href="%sveltekit.assets%/favicon.ico" />
-		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" />
+		<!-- viewport-fit=cover：布局视口延伸到刘海/Home 指示条等安全区之外，
+		     否则全面屏底部会露出一条未被页面覆盖的黑带（安全区），
+		     页面内部再用 env(safe-area-inset-*) 把交互元素从手势区抬起来 -->
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0, viewport-fit=cover" />
 		<meta name="theme-color" content="#0b0b12" />
 		<meta http-equiv="X-UA-Compatible" content="IE=edge" />
 		<link rel="manifest" href="%sveltekit.assets%/manifest.webmanifest" />

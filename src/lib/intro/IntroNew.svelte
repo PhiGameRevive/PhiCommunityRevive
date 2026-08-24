@@ -61,6 +61,7 @@
     { at: 16.0, name: 'PhiCommunity', role: '原版项目 · yuameshi' },
     { at: 16.6, name: 'PhiZone', role: 'Player 引擎, 谱面资源' },
     { at: 17.2, name: 'PhiTogether', role: '谱面资源' },
+    { at: 17.8, name: 'OSU!Lazer', role: '灵感设计' },
   ];
 
   let elapsed = 0;
@@ -595,7 +596,7 @@
     position: absolute;
     left: 0;
     right: 0;
-    bottom: 22px;
+    bottom: calc(22px + env(safe-area-inset-bottom, 0px));
     z-index: 18;
     display: flex;
     flex-direction: column;
@@ -624,7 +625,7 @@
   .skip-hint {
     position: absolute;
     right: 24px;
-    bottom: 20px;
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px));
     z-index: 18;
     color: rgba(255, 255, 255, 0.32);
     font-family: var(--phi-mono);

@@ -153,6 +153,13 @@ export class Game extends Scene {
   private _timeScale: number = 1;
   private _lastProgressUpdate: number | undefined;
 
+  /**
+   * 练习模式的 A/B 循环区间（秒）。两者都设置后，播放越过 B 点会自动跳回 A 点。
+   * 未设置时为 null。
+   */
+  private _loopA: number | null = null;
+  private _loopB: number | null = null;
+
   private _fonts: Record<string, string> = {};
 
   private _objects: Node[] = [];
@@ -592,6 +599,17 @@ export class Game extends Scene {
 
   end() {
     if (this._status === GameStatus.ERROR) return;
+    // 练习模式：播完不结算，改为停在暂停界面，玩家可继续跳转或主动退出。
+    // 不能直接复用 pause()：歌曲已播完，isPlaying 为 false 会让它提前 return。
+    if (this._practice) {
+      if (this._status === GameStatus.PAUSED) return;
+      clearTimeout(this._timeout);
+      this._status = GameStatus.PAUSED;
+      if (!this._render) this._clock.pause();
+      this._videos?.forEach((video) => video.pause());
+      EventBus.emit('paused', false);
+      return;
+    }
     this._status = GameStatus.FINISHED;
     this.out(() => {
       this.resetShadersAndVideos();
@@ -621,6 +639,47 @@ export class Game extends Scene {
     this._videos?.forEach((video) => video.setSeek(value));
   }
 
+  /* ---------------- 练习模式：A/B 点循环 ---------------- */
+
+  /** 设置 A 点（循环起点）；传 null 清除。B 点在其之前时一并清除。 */
+  setLoopA(value: number | null) {
+    this._loopA = value;
+    if (value !== null && this._loopB !== null && this._loopB <= value) this._loopB = null;
+  }
+
+  /** 设置 B 点（循环终点）；传 null 清除。A 点在其之后时一并清除。 */
+  setLoopB(value: number | null) {
+    this._loopB = value;
+    if (value !== null && this._loopA !== null && this._loopA >= value) this._loopA = null;
+  }
+
+  clearLoop() {
+    this._loopA = null;
+    this._loopB = null;
+  }
+
+  public get loopA() {
+    return this._loopA;
+  }
+
+  public get loopB() {
+    return this._loopB;
+  }
+
+  /**
+   * 越过 B 点时跳回 A 点。仅练习模式生效，在 update 的时间推进之后调用。
+   * 判定与统计交由 updateChart 的「时间回退」分支自行重置。
+   */
+  private applyPracticeLoop() {
+    if (!this._practice || this._loopA === null || this._loopB === null) return;
+    if (this._status !== GameStatus.PLAYING) return;
+    if (this.timeSec < this._loopB) return;
+    this._judgmentHandler.reset();
+    this._pointerHandler?.reset();
+    this._keyboardHandler?.reset();
+    this.setSeek(this._loopA);
+  }
+
   update(time: number, delta: number) {
     if (
       !this._song ||
@@ -641,6 +700,8 @@ export class Game extends Scene {
     }
     if (!this._render) {
       this._clock.update();
+      // 练习模式的 A/B 循环：紧跟时钟推进判断，越过 B 点即跳回 A 点
+      this.applyPracticeLoop();
     }
     if (this._resultsUI) this._resultsUI.update();
     const status = this._status;
