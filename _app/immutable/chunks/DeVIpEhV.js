@@ -1,0 +1,1 @@
+const n=["new","legacy"],e="phiIntroStyle",r="phiIntroSeen";const o=()=>{try{const t=localStorage.getItem(e);return n.includes(t??"")?t:"new"}catch{return"new"}},a=t=>{try{localStorage.setItem(e,t)}catch{}},c=()=>{try{return localStorage.getItem(r)==="true"}catch{return!1}},s=()=>{try{localStorage.setItem(r,"true")}catch{}};export{n as I,c as h,o as l,s as m,a as s};
