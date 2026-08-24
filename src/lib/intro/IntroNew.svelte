@@ -31,25 +31,37 @@
     logoIn: 1.2,
     logoOut: 4.6,
     disclaimerIn: 5.0,
-    disclaimerOut: 8.6,
-    bootLogIn: 9.0,
-    bootLogOut: 13.2,
-    versionIn: 13.5,
-    versionOut: 17.4,
-    /** 音乐高潮命中：一切揭晓 */
-    climax: 19.0,
+    disclaimerOut: 8.2,
+    bootLogIn: 8.6,
+    bootLogOut: 12.6,
+    versionIn: 12.9,
+    versionOut: 15.2,
+    thanksIn: 15.6,
+    thanksOut: 18.4,
+    /**
+     * 音乐高潮命中：一切揭晓。
+     * 高潮区间为 19~20 秒，取 19.5 让画面比鼓点稍晚半拍落下，冲击感更足。
+     */
+    climax: 19.5,
   };
 
   /** 启动日志：把刚才真实完成的预载结果亮出来（等宽字体逐字打出） */
   const BOOT_LOG: { at: number; text: string }[] = [
-    { at: 9.0, text: '> init  phi-community-revive .......... ok' },
-    { at: 9.9, text: '> mount chart sources  (phi/ptc/pz) ... ok' },
-    { at: 10.8, text: '> cache game assets ................... ok' },
-    { at: 11.7, text: '> warm  phaser engine ................. ok' },
-    { at: 12.6, text: '> ready' },
+    { at: 8.6, text: '> init  phi-community-revive .......... ok' },
+    { at: 9.4, text: '> mount chart sources  (phi/ptc/pz) ... ok' },
+    { at: 10.2, text: '> cache game assets ................... ok' },
+    { at: 11.0, text: '> warm  phaser engine ................. ok' },
+    { at: 11.8, text: '> ready' },
   ];
   /** 打字速度（字符/秒） */
   const TYPE_CPS = 46;
+
+  /** 特别鸣谢：逐条错开出现（各自的 at 为出现时刻） */
+  const THANKS: { at: number; name: string; role: string }[] = [
+    { at: 16.0, name: 'PhiCommunity', role: '原版项目 · yuameshi' },
+    { at: 16.6, name: 'PhiZone', role: 'Player 引擎, 谱面资源' },
+    { at: 17.2, name: 'PhiTogether', role: '谱面资源' },
+  ];
 
   let elapsed = 0;
   let animId = 0;
@@ -163,8 +175,9 @@
   $: showDisclaimer = elapsed >= T.disclaimerIn && elapsed < T.disclaimerOut;
   $: showBootLog = elapsed >= T.bootLogIn && elapsed < T.bootLogOut;
   $: showVersion = elapsed >= T.versionIn && elapsed < T.versionOut;
+  $: showThanks = elapsed >= T.thanksIn && elapsed < T.thanksOut;
   $: climax = elapsed >= T.climax;
-  /** 收拢留白：版本卡片淡出到高潮之间保持纯黑 */
+  /** 收拢留白：鸣谢淡出到高潮之间保持纯黑 */
   $: showSkipHint = canSkip && !climax && elapsed >= T.logoIn;
 </script>
 
@@ -222,7 +235,20 @@
     {/if}
   </div>
 
-  <!-- ⑤ 高潮：TAP TO START + 花瓣 -->
+  <!-- ⑤ 特别鸣谢：三条依次浮现，随后整体淡出留白，接高潮 -->
+  <div class="stage thanks" class:on={showThanks}>
+    <span class="thanks-label">特别鸣谢</span>
+    <div class="thanks-list">
+      {#each THANKS as item}
+        <div class="thanks-item" class:on={showThanks && elapsed >= item.at}>
+          <strong>{item.name}</strong>
+          <small>{item.role}</small>
+        </div>
+      {/each}
+    </div>
+  </div>
+
+  <!-- ⑥ 高潮：TAP TO START + 花瓣 -->
   {#if climax && !occluded}
     <PetalField />
   {/if}
@@ -458,6 +484,57 @@
     color: rgba(255, 255, 255, 0.6);
     font-size: clamp(0.58rem, 1.3vw, 0.7rem);
     letter-spacing: 0.22em;
+  }
+
+  /* ---- ④b 特别鸣谢：三条依次浮现 ---- */
+  .thanks {
+    gap: 22px;
+    text-align: center;
+  }
+
+  .thanks-label {
+    color: rgba(255, 255, 255, 0.4);
+    font-family: var(--phi-mono);
+    font-size: clamp(0.6rem, 1.4vw, 0.72rem);
+    font-weight: 700;
+    letter-spacing: 0.34em;
+  }
+
+  .thanks-list {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    align-items: center;
+  }
+
+  .thanks-item {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    opacity: 0;
+    transform: translateY(10px);
+    transition:
+      opacity 0.7s ease,
+      transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .thanks-item.on {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .thanks-item strong {
+    font-size: clamp(1.2rem, 3vw, 1.8rem);
+    font-weight: 900;
+    letter-spacing: 0.06em;
+    text-shadow: 0 0 24px rgba(255, 255, 255, 0.25);
+  }
+
+  .thanks-item small {
+    color: rgba(255, 255, 255, 0.5);
+    font-family: var(--phi-mono);
+    font-size: clamp(0.58rem, 1.3vw, 0.7rem);
+    letter-spacing: 0.16em;
   }
 
   /* ---- ⑤ TAP TO START ---- */
