@@ -1,212 +1,285 @@
 <script lang="ts">
+  /**
+   * 启动流程编排：
+   *   ① 界面缩放（仅首次启动）
+   *   ② 节点选择（每次启动；此处的点击同时作为解锁 AudioContext 的用户手势）
+   *   ③ 光敏性癫痫警告（无按钮，5 秒自动推进，可点击加速）
+   *   ④ 预载（谱面列表 + 游玩素材 + 引擎包 + 开场音频解码，带真实进度条）
+   *   ⑤ 开场动画（新版 19 秒 / 旧版 8.5 秒，由设置切换；首次启动不可跳过）
+   *   ⑥ 黑屏 → 全屏加载界面 → /songs
+   *
+   * 音频必须在用户手势内 resume()，因此 ② 的点击是整个流程的音频解锁点；
+   * 跨节点跳转会换域名（等于新页面），届时新域名同样先展示 ② ，手势不会丢失。
+   */
   import { goto } from '$app/navigation';
   import { onDestroy, onMount } from 'svelte';
   import { preloadSongLists, warmPlayerBundle, type PreloadedSongLists } from '$lib/preload';
+  import { preloadGameAssets } from '$lib/preloadAssets';
   import PhigrosLoading from '$lib/components/PhigrosLoading.svelte';
+  import LoadingCanvas from '$lib/components/LoadingCanvas.svelte';
+  import IntroNew from '$lib/intro/IntroNew.svelte';
+  import IntroLegacy from '$lib/intro/IntroLegacy.svelte';
   import { randomTip } from '$lib/loadingTips';
+  import {
+    DEPLOY_NODES,
+    applyInheritedParams,
+    getCurrentNode,
+    gotoNode,
+    probeNode,
+    type DeployNode,
+  } from '$lib/nodes';
+  import {
+    DEFAULT_UI_SCALE,
+    MAX_UI_SCALE,
+    MIN_UI_SCALE,
+    UI_SCALE_STEP,
+    commitUiScale,
+    hasUiScalePreference,
+    loadUiScale,
+  } from '$lib/uiScale';
+  import { hasSeenIntro, loadIntroStyle, markIntroSeen, type IntroStyle } from '$lib/introStyle';
 
-  /**
-   * 开场流程（legacy tapToStart 体验）：
-   *   boot(黑屏) → warning(光敏性癫痫警告) → 点击解锁音频(TapToStart.mp3 循环+渐入)
-   *   → 黑屏上播完制作组/原作者/PhiZone图标(8.5s 前) → 播放 8.5s → tap(Tap To Start 页)
-   *   → 点击 → 黑屏 → 全屏加载界面(共享 PhigrosLoading 组件，等谱面列表就绪) → /songs
-   * 期间并行预载三个谱面源列表并预热 Phaser 引擎包，保证进入选歌页零等待。
-   */
-  type Stage = 'boot' | 'warning' | 'playing' | 'tap' | 'loading' | 'exit';
+  type Stage = 'boot' | 'scale' | 'node' | 'warning' | 'preload' | 'intro' | 'exit' | 'loading';
 
   let stage: Stage = 'boot';
-  let version = 'v2.0.0';
+  const version = 'v2.0.0';
 
-  let actx: AudioContext | null = null;
-  let audioBufferPromise: Promise<AudioBuffer | null> = Promise.resolve(null);
-  let audioSource: AudioBufferSourceNode | null = null;
-  let audioGain: GainNode | null = null;
-  let sourceStarted = false;
+  let introStyle: IntroStyle = 'new';
+  /** 首次启动（未完整看过开场）时禁止跳过前摇 */
+  let canSkipIntro = false;
 
-  const AUDIO_URL = '/audio/TapToStart.mp3';
+  /* ---------------- ① 界面缩放 ---------------- */
+  let uiScale = DEFAULT_UI_SCALE;
 
-  let clearTimers: () => void = () => {};
-  let skipTimer = 0;
-  let skipAt = 0;
-  let iconOnTimer = 0;
-  let iconOffTimer = 0;
-  let iconsOn = false;
-  let disclaimerTimer = 0;
-  let disclaimerOn = false;
-  let skipDone = false;
-  let exitTimer = 0;
+  const applyScalePreview = (value: number) => {
+    // commitUiScale 会把 zoom 直接写到 <html>，整个面板随之缩放 —— 这就是实时预览
+    uiScale = commitUiScale(value);
+  };
 
-  let listsPromise: Promise<PreloadedSongLists> = Promise.resolve({
-    phi: [],
-    ptc: [],
-    pz: [],
-  });
+  /* ---------------- ② 节点选择 ---------------- */
+  let currentNode: DeployNode | null = null;
+  let selectedNodeId: string | null = null;
+  let latencies: Record<string, number | null | undefined> = {};
 
-  // ---- 全屏加载界面：进度由计时推进，绘制交给共享 PhigrosLoading 组件 ----
-  const MIN_LOADING_MS = 900;
+  const probeAll = () => {
+    DEPLOY_NODES.forEach(async (node) => {
+      latencies = { ...latencies, [node.id]: undefined };
+      const ms = await probeNode(node);
+      latencies = { ...latencies, [node.id]: ms };
+    });
+  };
 
-  let loadingStart = 0;
-  let loadingDone = false;
-  let leavingLoading = false;
-  let loadProgress = 0;
-  let progressTimer = 0;
+  /** 选择节点：当前节点原地继续（并解锁音频），其他节点带着设置跳过去 */
+  const chooseNode = (node: DeployNode) => {
+    if (stage !== 'node') return;
+    selectedNodeId = node.id;
+    // 已在该节点上 → 原地继续；否则跳转（含当前域名未配置的情况，如本地开发）
+    if (currentNode?.id === node.id) {
+      void unlockAudio();
+      stage = 'warning';
+      startWarningCountdown();
+      return;
+    }
+    gotoNode(node, { scale: uiScale, onboarded: canSkipIntro, intro: introStyle });
+  };
 
-  let tipText = '';
-  let coverUrl = '/ui/ElementSqare.webp';
+  /** 无可用节点配置时（.env 全空 / 本地开发）跳过选择，但仍需一次点击解锁音频 */
+  const continueWithoutNode = () => {
+    if (stage !== 'node') return;
+    void unlockAudio();
+    stage = 'warning';
+    startWarningCountdown();
+  };
 
-  onMount(() => {
-    // 1) 后台预载：谱面列表就绪后再预热引擎包（避免争抢带宽）
-    //    保存列表 Promise，进入加载界面时等待它完成再跳转选歌页
+  /* ---------------- ③ 光敏性警告 ---------------- */
+  const WARNING_MS = 5000;
+  let warningCountdown = Math.ceil(WARNING_MS / 1000);
+  let warningTimer = 0;
+  let warningTicker = 0;
+
+  const startWarningCountdown = () => {
+    clearTimeout(warningTimer);
+    clearInterval(warningTicker);
+    warningCountdown = Math.ceil(WARNING_MS / 1000);
+    warningTimer = window.setTimeout(leaveWarning, WARNING_MS);
+    warningTicker = window.setInterval(() => {
+      warningCountdown = Math.max(0, warningCountdown - 1);
+    }, 1000);
+  };
+
+  const leaveWarning = () => {
+    if (stage !== 'warning') return;
+    clearTimeout(warningTimer);
+    clearInterval(warningTicker);
+    stage = 'preload';
+    startPreload();
+  };
+
+  /* ---------------- ④ 预载 ---------------- */
+  /** 权重：素材文件数最多耗时也最长，谱面列表次之 */
+  const PRELOAD_WEIGHTS = { assets: 0.5, lists: 0.3, audio: 0.2 };
+
+  let preloadProgress = 0;
+  let preloadDetail = '';
+  let assetRatio = 0;
+  let listsRatio = 0;
+  let audioRatio = 0;
+  let preloadController: AbortController | null = null;
+  /** 首次启动才提示"需要预载配置"（二次启动素材多已命中缓存，很快过去） */
+  let firstBoot = true;
+
+  const recomputeProgress = () => {
+    preloadProgress =
+      assetRatio * PRELOAD_WEIGHTS.assets +
+      listsRatio * PRELOAD_WEIGHTS.lists +
+      audioRatio * PRELOAD_WEIGHTS.audio;
+  };
+
+  let listsPromise: Promise<PreloadedSongLists> = Promise.resolve({ phi: [], ptc: [], pz: [] });
+
+  const startPreload = () => {
+    const controller = new AbortController();
+    preloadController = controller;
+
+    // 谱面列表（三个源并行；单源失败不影响其他源）
     listsPromise = preloadSongLists().then((l) => {
+      listsRatio = 1;
+      recomputeProgress();
+      // 列表就绪后再预热引擎包，避免与素材下载争抢带宽
       warmPlayerBundle();
       return l;
     });
+    listsPromise.catch(() => {
+      listsRatio = 1;
+      recomputeProgress();
+    });
 
-    // 2) 预取开场音频并解码（fetch/decode 无需用户手势，点击时即刻开播）
-    try {
-      actx = new (window.AudioContext ||
-        (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!)();
-      audioBufferPromise = fetch(AUDIO_URL)
-        .then((res) => (res.ok ? res.arrayBuffer() : Promise.reject(new Error(`HTTP ${res.status}`))))
-        .then((buf) => actx!.decodeAudioData(buf))
-        .catch((e) => {
-          console.warn('TapToStart audio decode failed', e);
-          return null;
-        });
-    } catch (e) {
-      console.warn('AudioContext unavailable', e);
-    }
+    // 游玩素材（note 贴图 / 打击音效 / 判定特效 / 评级图 / 结算音 / shader / Outfit 字体）
+    const assetsPromise = preloadGameAssets((ratio) => {
+      assetRatio = ratio;
+      preloadDetail = `游玩素材 ${Math.round(ratio * 100)}%`;
+      recomputeProgress();
+    }, controller.signal);
 
-    const timers = [
-      // 黑屏停留片刻 → 直接进入光敏性癫痫警告（图标移到音乐播放阶段展示）
-      setTimeout(() => (stage = 'warning'), 600),
-    ];
-    clearTimers = () => {
-      timers.forEach((t) => clearTimeout(t));
-      clearTimeout(skipTimer);
-      clearTimeout(iconOnTimer);
-      clearTimeout(iconOffTimer);
-      clearTimeout(disclaimerTimer);
-      clearTimeout(exitTimer);
-      clearInterval(progressTimer);
-    };
-  });
+    // 开场音频：解码完成才起播，避免动画与音乐错位
+    const audioPromise = decodeIntroAudio().then((ok) => {
+      audioRatio = 1;
+      recomputeProgress();
+      return ok;
+    });
 
-  onDestroy(() => {
-    clearTimers();
-    if (actx && actx.state !== 'closed') void actx.close();
-  });
-
-  /** 点击警告页按钮：浏览器手势解锁 AudioContext 并开始循环播放（带 1.5s 渐入） */
-  const startAudio = async () => {
-    try {
-      const buffer = await audioBufferPromise;
-      if (!actx || !buffer || sourceStarted) return;
-      await actx.resume();
-      sourceStarted = true;
-      const source = actx.createBufferSource();
-      source.buffer = buffer;
-      source.loop = true;
-      const gain = actx.createGain();
-      const now = actx.currentTime;
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.9, now + 1.5);
-      source.connect(gain);
-      gain.connect(actx.destination);
-      source.start();
-      audioSource = source;
-      audioGain = gain;
-    } catch (e) {
-      console.warn('TapToStart playback failed', e);
-    }
-  };
-
-  /** 跳过前摇时把音乐直接推进到指定秒数（旧源停、新源从 offset 起播，复用已渐入的增益节点） */
-  const seekAudio = (offset: number) => {
-    if (!actx || !audioSource || !audioGain) return;
-    try {
-      const buffer = audioSource.buffer;
-      if (!buffer) return;
-      const t = actx.currentTime;
-      audioSource.stop(t);
-      const source = actx.createBufferSource();
-      source.buffer = buffer;
-      source.loop = true;
-      source.connect(audioGain);
-      source.start(t, offset);
-      audioSource = source;
-    } catch (e) {
-      console.warn('TapToStart seek failed', e);
-    }
-  };
-
-  const begin = () => {
-    if (stage !== 'warning') return;
-    stage = 'playing';
-    // 音乐渐入的同时，在黑屏上展示制作组图标（8.5s 前播完，与警告淡出交叉）
-    iconOnTimer = window.setTimeout(() => (iconsOn = true), 0);
-    iconOffTimer = window.setTimeout(() => (iconsOn = false), 4400);
-    // 图标渐出后，黑屏上渐入文字免责声明（读到 8.5s，被 Tap To Start 取代）
-    disclaimerTimer = window.setTimeout(() => (disclaimerOn = true), 5400);
-    // 播放 8~9 秒后显现 Tap To Start 页面（解码失败也照常推进，不卡死流程）
-    void startAudio().finally(() => {
-      skipTimer = window.setTimeout(() => (stage = 'tap'), 8500);
+    void Promise.all([listsPromise.catch(() => null), assetsPromise, audioPromise]).then(() => {
+      if (controller.signal.aborted) return;
+      preloadProgress = 1;
+      preloadDetail = '准备完成';
+      // 让进度条走满的那一帧被看见，再进入开场动画
+      window.setTimeout(() => {
+        if (controller.signal.aborted) return;
+        stage = 'intro';
+      }, 260);
     });
   };
 
-  /** playing 阶段点击 = 跳过前摇直达 Tap To Start；tap 阶段点击 = 进入选歌页 */
-  const skipOrExit = () => {
-    if (stage === 'playing') {
-      clearTimeout(skipTimer);
-      clearTimeout(iconOnTimer);
-      clearTimeout(iconOffTimer);
-      clearTimeout(disclaimerTimer);
-      iconsOn = false;
-      disclaimerOn = false;
-      skipDone = true; // 跳过 = 直达终态：禁用一切渐入过渡
-      stage = 'tap';
-      skipAt = performance.now();
-      // 音乐一并跳到 8.5 秒处，与"正常等到 8~9 秒"的听感一致
-      seekAudio(8.5);
-      return;
-    }
-    if (stage === 'tap') {
-      // 刚跳过后的瞬间忽略，防止"跳过 + 误触退出"连发
-      if (performance.now() - skipAt < 350) return;
-      exit();
+  /* ---------------- 音频 ---------------- */
+  let actx: AudioContext | null = null;
+  let introBuffer: AudioBuffer | null = null;
+
+  const audioUrl = (style: IntroStyle) =>
+    style === 'new' ? '/audio/TapToStartNew.mp3' : '/audio/TapToStart.mp3';
+
+  /** 在用户手势内创建并 resume AudioContext（解码可以晚一点做） */
+  const unlockAudio = async () => {
+    try {
+      if (!actx) {
+        const Ctor =
+          window.AudioContext ??
+          (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (!Ctor) return;
+        actx = new Ctor();
+      }
+      if (actx.state === 'suspended') await actx.resume();
+    } catch (e) {
+      console.warn('AudioContext unlock failed', e);
     }
   };
 
-  const exit = () => {
-    if (stage !== 'tap') return;
-    // 跳过时锁死的过渡恢复：Tap To Start → 黑屏的渐出重新生效
-    skipDone = false;
+  /** 下载并解码开场音频；失败时返回 false，动画照常进行（只是没有声音） */
+  const decodeIntroAudio = async (): Promise<boolean> => {
+    if (!actx) return false;
+    try {
+      const res = await fetch(audioUrl(introStyle), { credentials: 'omit' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const total = Number(res.headers.get('content-length')) || 0;
+      // 有 content-length 时按字节汇报进度，否则只在完成时跳到 100%
+      const buf = total && res.body ? await readWithProgress(res.body, total) : await res.arrayBuffer();
+      introBuffer = await actx.decodeAudioData(buf);
+      return true;
+    } catch (e) {
+      console.warn('intro audio decode failed', e);
+      return false;
+    }
+  };
+
+  const readWithProgress = async (
+    body: ReadableStream<Uint8Array>,
+    total: number,
+  ): Promise<ArrayBuffer> => {
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      audioRatio = Math.min(received / total, 1);
+      recomputeProgress();
+    }
+    const merged = new Uint8Array(received);
+    let offset = 0;
+    for (const c of chunks) {
+      merged.set(c, offset);
+      offset += c.length;
+    }
+    return merged.buffer;
+  };
+
+  /* ---------------- ⑥ 退出到选歌页 ---------------- */
+  const MIN_LOADING_MS = 900;
+
+  let loadingStart = 0;
+  let leavingLoading = false;
+  let loadProgress = 0;
+  let progressTimer = 0;
+  let tipText = '';
+  let coverUrl = '/ui/ElementSqare.webp';
+  let exitTimer = 0;
+
+  const finishIntro = () => {
+    if (stage !== 'intro') return;
+    markIntroSeen();
     stage = 'exit';
     clearTimeout(exitTimer);
-    // 黑屏遮罩淡入(0.5s)后，接全屏加载界面，等谱面列表就绪再进选歌页
     exitTimer = window.setTimeout(() => {
       stage = 'loading';
       startLoading();
-      // 首次用户先完成基础设置；设置页返回时再自动进入 PTC 新手教程。
+      // 首次用户先完成基础设置；设置页返回时再自动进入 PTC 新手教程
       if (!localStorage.getItem('phiOnboardingDone')) {
         sessionStorage.setItem('firstUserSetupReturn', 'tutorial');
         window.setTimeout(() => goto('/settings'), 500);
         return;
       }
-      // 随机一条左下角 Tip
       tipText = randomTip();
-      // 谱面列表就绪后，随机挑一首歌的曲绘当加载背景（列表未就绪时用默认图兜底）
+      // 谱面列表就绪后随机挑一首曲绘当加载背景（未就绪时用默认图兜底）
       void listsPromise.then((lists) => {
         const songs = [...lists.phi, ...lists.ptc, ...lists.pz].filter((s) => s.illustration);
         if (songs.length > 0) {
           coverUrl = songs[Math.floor(Math.random() * songs.length)].illustration;
         }
       });
-      void Promise.all([listsPromise, waitForMinimumLoading()]).then(() => {
-        loadingDone = true;
+      void Promise.all([listsPromise.catch(() => null), waitForMinimumLoading()]).then(() => {
         loadProgress = 1;
         clearInterval(progressTimer);
-        // 进度条走满一帧后，黑屏渐出再跳转选歌页
         window.setTimeout(() => {
           leavingLoading = true;
           window.setTimeout(() => goto('/songs'), 500);
@@ -215,10 +288,8 @@
     }, 500);
   };
 
-  /** 进入加载界面：进度条随经过时间推进，绘制由共享组件逐帧完成 */
   const startLoading = () => {
     loadingStart = performance.now();
-    loadingDone = false;
     loadProgress = 0;
     clearInterval(progressTimer);
     progressTimer = window.setInterval(() => {
@@ -226,274 +297,532 @@
     }, 60);
   };
 
-  /** LOADING 动画最短展示时长，避免列表命中缓存时一闪而过。 */
   const waitForMinimumLoading = async () => {
     const elapsed = performance.now() - loadingStart;
     if (elapsed < MIN_LOADING_MS) {
       await new Promise((resolve) => setTimeout(resolve, MIN_LOADING_MS - elapsed));
     }
   };
+
+  /* ---------------- 生命周期 ---------------- */
+  onMount(() => {
+    // 跨节点跳转落地：先消费 URL 上继承过来的设置，再判断是否首次启动
+    const inherited = applyInheritedParams();
+    uiScale = loadUiScale();
+    introStyle = loadIntroStyle();
+    canSkipIntro = hasSeenIntro();
+    firstBoot = !canSkipIntro;
+    currentNode = getCurrentNode();
+    selectedNodeId = inherited.node ?? currentNode?.id ?? null;
+
+    // 已设置过缩放（含继承）则跳过缩放页，直接进入节点选择
+    const needScale = !hasUiScalePreference();
+    window.setTimeout(() => {
+      stage = needScale ? 'scale' : 'node';
+      if (!needScale) probeAll();
+    }, 400);
+  });
+
+  onDestroy(() => {
+    clearTimeout(warningTimer);
+    clearInterval(warningTicker);
+    clearTimeout(exitTimer);
+    clearInterval(progressTimer);
+    preloadController?.abort();
+    if (actx && actx.state !== 'closed') void actx.close();
+  });
 </script>
 
 <svelte:head>
   <title>PhiCommunity</title>
-  <!-- 提前缓存 Tap To Start 页的背景大图，避免显现时闪白 -->
+  <!-- 提前缓存开场背景大图，避免高潮命中时闪白 -->
   <link rel="preload" as="image" href="/ui/ElementSqare.webp" />
 </svelte:head>
 
-<!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
-<div class="boot" class:skipping={skipDone} role="application" tabindex="0">
-  <!-- 背景（tap 阶段才揭晓，8.5s 前保持纯黑；缓慢淡入避免闪光） -->
-  <div class="bg" class:on={stage === 'tap'}></div>
-  <div class="bg-dim" class:reveal={stage === 'tap'}></div>
-  <div class="scanlines" class:on={stage === 'tap'}></div>
+<div class="boot-root">
+  <!-- ① 界面缩放（仅首次启动）：zoom 作用在 <html> 上，整个面板即所见即所得的预览 -->
+  {#if stage === 'scale'}
+    <div class="panel-screen">
+      <div class="panel">
+        <span class="panel-label">STEP 1 / 2</span>
+        <h1 class="panel-title">调整界面大小</h1>
+        <p class="panel-hint">
+          拖动滑块，整个界面会随之放大或缩小，直到看起来舒适为止。之后可在「设置 → 界面」随时修改。
+        </p>
 
-  <!-- ① 制作组名称 + 原作者 + PhiZone player 图标（音乐播放阶段黑屏上展示，图标横向排列） -->
-  <div class="credits" class:on={iconsOn}>
-    <div class="credits-icons">
-      <img class="phizone-logo" src="/ui/phizone-icon.png" alt="PhiZone Player" />
-      <img class="title-logo" src="/ui/Title.svg" alt="PhiCommunity" />
+        <div class="scale-preview">
+          <div class="preview-card">
+            <span class="preview-name">Introduction</span>
+            <span class="preview-artist">PhiCommunity</span>
+            <div class="preview-levels">
+              <span>EZ</span><span>HD</span><span class="active">IN</span><span>AT</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="scale-control">
+          <button class="step-btn" onclick={() => applyScalePreview(uiScale - UI_SCALE_STEP)} aria-label="缩小">−</button>
+          <input
+            type="range"
+            min={MIN_UI_SCALE}
+            max={MAX_UI_SCALE}
+            step={UI_SCALE_STEP}
+            value={uiScale}
+            oninput={(e) => applyScalePreview(Number(e.currentTarget.value))}
+            aria-label="界面大小"
+          />
+          <button class="step-btn" onclick={() => applyScalePreview(uiScale + UI_SCALE_STEP)} aria-label="放大">+</button>
+          <span class="scale-value">{Math.round(uiScale * 100)}%</span>
+        </div>
+
+        <div class="panel-actions">
+          <button class="ghost-btn" onclick={() => applyScalePreview(DEFAULT_UI_SCALE)}>重置</button>
+          <button
+            class="primary-btn"
+            onclick={() => {
+              applyScalePreview(uiScale);
+              stage = 'node';
+              probeAll();
+            }}
+          >
+            下一步
+          </button>
+        </div>
+      </div>
     </div>
-    <div class="credits-line">
-      <span class="credits-label">原作者</span>
-      <span class="credits-name">yuameshi</span>
+  {/if}
+
+  <!-- ② 节点选择（每次启动；点击即解锁音频） -->
+  {#if stage === 'node'}
+    <div class="panel-screen">
+      <div class="panel">
+        <span class="panel-label">SELECT NODE</span>
+        <h1 class="panel-title">选择线路</h1>
+        <p class="panel-hint">选择延迟较低的线路以获得更快的加载速度。</p>
+
+        {#if DEPLOY_NODES.length > 0}
+          <div class="node-list">
+            {#each DEPLOY_NODES as node}
+              {@const ms = latencies[node.id]}
+              <button
+                class="node-item"
+                class:current={currentNode?.id === node.id}
+                class:selected={selectedNodeId === node.id}
+                onclick={() => chooseNode(node)}
+              >
+                <span class="node-main">
+                  <strong>{node.label}</strong>
+                  <small>{node.description}</small>
+                </span>
+                <span class="node-meta">
+                  {#if currentNode?.id === node.id}
+                    <em class="node-tag">当前</em>
+                  {/if}
+                  {#if ms === undefined}
+                    <span class="node-ping probing">探测中</span>
+                  {:else if ms === null}
+                    <span class="node-ping bad">超时</span>
+                  {:else}
+                    <span class="node-ping" class:good={ms < 300}>{ms} ms</span>
+                  {/if}
+                </span>
+              </button>
+            {/each}
+          </div>
+          <div class="panel-actions">
+            <button class="ghost-btn" onclick={probeAll}>重新探测</button>
+            {#if !currentNode}
+              <!-- 当前域名不在已配置节点内（本地开发 / 自定义域名）：允许留在此处 -->
+              <button class="primary-btn" onclick={continueWithoutNode}>留在当前站点</button>
+            {/if}
+          </div>
+        {:else}
+          <p class="panel-hint">未配置任何节点地址（.env 的 VITE_SITE_*），将使用当前站点。</p>
+          <button class="primary-btn wide" onclick={continueWithoutNode}>继续</button>
+        {/if}
+      </div>
     </div>
-  </div>
+  {/if}
 
-  <!-- ①b 文字免责声明（图标渐出后渐入，读到 8.5s 被 Tap To Start 取代） -->
-  <div class="disclaimer" class:on={disclaimerOn && stage === 'playing'}>
-    <p>本作为 Phigros 同人社区作品，与厦门鸽游网络有限公司无关。</p>
-    <p>全部谱面、音乐与美术资源版权归原作者所有。</p>
-    <p>仅供学习交流，请勿用于商业用途。</p>
-  </div>
-
-  <!-- ② 光敏性癫痫警告（点击按钮 = 解锁音频的手势） -->
-  <div class="warning" class:on={stage === 'warning' || stage === 'playing'} class:leaving={stage === 'playing'}>
-    <h2 class="warning-title">光敏性癫痫警告</h2>
-    <p class="warning-text">
-      本游戏包含快速闪烁的画面与高对比度特效，可能诱发光敏性癫痫发作。
-      如果你或家人有癫痫病史，请在游玩前咨询医生。
-      若出现头晕、视力模糊、眼部或肌肉抽搐等症状，请立即停止游玩。
-    </p>
-    <button class="warning-btn" onclick={begin}>点按继续</button>
-  </div>
-
-  <!-- ③ Tap To Start 页 -->
-  <div class="tap" class:on={stage === 'tap'}>
-    <img class="title-logo big" src="/ui/Title.svg" alt="PhiCommunity" />
-    <div class="tap-to-start">
-      <span class="dot">▮</span>
-      TAP TO START
-      <span class="dot">▮</span>
+  <!-- ③ 光敏性癫痫警告：无按钮，倒计时自动推进，点击可加速 -->
+  {#if stage === 'warning'}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
+    <div
+      class="warning-screen"
+      role="button"
+      tabindex="0"
+      onclick={leaveWarning}
+      onkeydown={(e) => (e.key === ' ' || e.key === 'Enter') && leaveWarning()}
+    >
+      <h2 class="warning-title">光敏性癫痫警告</h2>
+      <p class="warning-text">
+        本游戏包含快速闪烁的画面与高对比度特效，可能诱发光敏性癫痫发作。
+        如果你或家人有癫痫病史，请在游玩前咨询医生。
+        若出现头晕、视力模糊、眼部或肌肉抽搐等症状，请立即停止游玩。
+      </p>
+      <div class="warning-progress" style={`--warn-ms: ${WARNING_MS}ms`}></div>
+      <span class="warning-count">{warningCountdown} 秒后继续 · 点按加速</span>
     </div>
-  </div>
+  {/if}
 
-  <div class="info" class:on={stage === 'tap'}>
-    <span class="ver">PhiCommunity Revive {version}</span>
-    <span class="disclaimer">
-      本项目与厦门鸽游网络有限公司（Xiamen Pigeon Games Network Co., Ltd.）没有任何关系
-    </span>
-  </div>
+  <!-- ④ 预载：LOADING 进度条 + 首次启动提示 -->
+  {#if stage === 'preload'}
+    <div class="preload-screen">
+      <LoadingCanvas progress={preloadProgress} detail={preloadDetail} />
+      <p class="preload-hint">
+        {#if firstBoot}
+          首次启动需要预载配置，请稍等
+        {:else}
+          正在准备资源，请稍等
+        {/if}
+      </p>
+    </div>
+  {/if}
 
-  <!-- 黑屏遮罩（退出时盖住全部，加载界面在其上叠出） -->
+  <!-- ⑤ 开场动画
+       exit / loading 阶段仍保持挂载：
+        - 黑屏遮罩要盖在 TAP TO START 画面上渐入（提前卸载会让画面硬切到黑屏）
+        - 音乐持续播放到跳转选歌页，不在加载界面出现时突然断掉
+       occluded 在被完全遮住后停掉花瓣，避免白费 GPU。 -->
+  {#if stage === 'intro' || stage === 'exit' || stage === 'loading'}
+    {#if introStyle === 'legacy'}
+      <IntroLegacy
+        {actx}
+        buffer={introBuffer}
+        canSkip={canSkipIntro}
+        {version}
+        nodeLabel={currentNode?.label ?? ''}
+        onDone={finishIntro}
+      />
+    {:else}
+      <IntroNew
+        {actx}
+        buffer={introBuffer}
+        canSkip={canSkipIntro}
+        occluded={stage === 'loading'}
+        {version}
+        nodeLabel={currentNode?.label ?? ''}
+        onDone={finishIntro}
+      />
+    {/if}
+  {/if}
+
+  <!-- 退出黑屏遮罩 -->
   <div class="fade-overlay" class:on={stage === 'exit' || stage === 'loading'}></div>
 
-  <!-- 全屏加载界面：共享 PhigrosLoading 组件（全屏曲绘 + 底部毛玻璃：左 Tip / 右 LOADING），
-      谱面列表就绪后黑屏渐出再跳转选歌页 -->
+  <!-- ⑥ 全屏加载界面 → /songs -->
   {#if stage === 'loading'}
     <PhigrosLoading cover={coverUrl} tip={tipText} progress={loadProgress} />
     <div class="loading-exit" class:on={leavingLoading}></div>
   {/if}
-
-  <!-- 点击命中区：playing 阶段点击跳过前摇，tap 阶段整屏可点进入 -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div
-    class="hit-zone"
-    class:on={stage === 'playing' || stage === 'tap'}
-    role="button"
-    tabindex="0"
-    onclick={skipOrExit}
-    onkeydown={(e) => (e.key === ' ' || e.key === 'Enter') && skipOrExit()}
-  ></div>
 </div>
 
 <style>
-  .boot {
+  .boot-root {
     position: fixed;
     inset: 0;
     overflow: hidden;
     background: #000;
     user-select: none;
-    cursor: pointer;
-    outline: none;
   }
 
-  /* ---- 背景 ---- */
-  .bg {
-    position: absolute;
-    inset: -20px;
-    background: url('/ui/ElementSqare.webp') center center no-repeat fixed;
-    background-size: cover;
-    /* 终态亮度固定为 legacy 同款 brightness(0.5)，只过渡 opacity，避免每帧重跑模糊 */
-    filter: blur(12px) brightness(0.5) contrast(0.9) grayscale(0.25);
-    transform: scale(1.1);
-    opacity: 0;
-    transition: opacity 1.2s ease;
-    pointer-events: none;
-  }
-
-  .bg.on {
-    opacity: 1;
-  }
-
-  /* 黑色压暗层：tap 阶段与背景同步 1.6s 揭晓（只动 opacity，合成器友好），
-     避免"黑屏 → 整页内容+背景"同时硬切造成闪光 */
-  .bg-dim {
+  /* ---- ①② 通用面板 ---- */
+  .panel-screen {
     position: absolute;
     inset: 0;
-    background: #000;
-    opacity: 1;
-    transition: opacity 1.6s ease;
-    pointer-events: none;
-  }
-
-  .bg-dim.reveal {
-    opacity: 0;
-  }
-
-  /* 极客风扫描线 */
-  .scanlines {
-    position: absolute;
-    inset: 0;
-    background: repeating-linear-gradient(
-      0deg,
-      rgba(255, 255, 255, 0.028) 0px,
-      rgba(255, 255, 255, 0.028) 1px,
-      transparent 1px,
-      transparent 3px
-    );
-    opacity: 0;
-    transition: opacity 0.8s ease;
-    pointer-events: none;
-  }
-
-  .scanlines.on {
-    opacity: 1;
-  }
-
-  /* ---- 通用舞台 ---- */
-  .credits,
-  .warning,
-  .tap {
-    position: absolute;
-    inset: 0;
+    z-index: 10;
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 24px;
+    overflow-y: auto;
+    animation: panel-in 0.45s ease;
+  }
+
+  @keyframes panel-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .panel {
+    width: min(560px, 100%);
+    display: flex;
     flex-direction: column;
-    opacity: 0;
-    transition: opacity 0.9s ease;
-    pointer-events: none;
-  }
-
-  .credits.on,
-  .tap.on {
-    opacity: 1;
-  }
-
-  /* 警告页需要接收按钮点击，其余舞台元素只做展示 */
-  .warning.on {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .warning.leaving {
-    opacity: 0;
-    pointer-events: none;
-  }
-
-  /* ---- ① 制作组 ---- */
-  .credits-icons {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-wrap: wrap;
-    gap: 32px;
-    padding: 0 24px;
-  }
-
-  /* PhiZone 横向 logo（带文字），按高度缩放 */
-  .phizone-logo {
-    height: 72px;
-    width: auto;
-    max-width: 46vw;
-    object-fit: contain;
-    filter: drop-shadow(0 0 14px rgba(255, 255, 255, 0.2));
-  }
-
-  .title-logo {
-    height: 64px;
-    width: auto;
-    max-width: 78vw;
-    object-fit: scale-down;
-    filter: drop-shadow(0 0 14px rgba(255, 255, 255, 0.22));
-  }
-
-  .credits-line {
-    display: flex;
-    align-items: baseline;
     gap: 14px;
-    margin-top: 26px;
-    font-family: 'Courier New', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-    letter-spacing: 0.18em;
+    padding: 28px clamp(20px, 4vw, 36px) 26px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 3px;
+    background: rgba(12, 12, 16, 0.86);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
   }
 
-  .credits-label {
-    color: rgba(255, 255, 255, 0.5);
-    font-size: 0.85rem;
-  }
-
-  .credits-name {
-    color: #fff;
-    font-size: 1.25rem;
+  .panel-label {
+    color: rgba(255, 255, 255, 0.4);
+    font-family: var(--phi-mono);
+    font-size: 0.62rem;
     font-weight: 700;
-    text-shadow: 0 0 18px rgba(255, 255, 255, 0.35);
+    letter-spacing: 0.26em;
   }
 
-  /* ---- ①b 文字免责声明 ---- */
-  .disclaimer {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 56%;
+  .panel-title {
+    margin: 0;
+    font-size: clamp(1.4rem, 3.4vw, 1.9rem);
+    font-weight: 900;
+    letter-spacing: 0.08em;
+  }
+
+  .panel-hint {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.85rem;
+    line-height: 1.8;
+  }
+
+  .panel-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 6px;
+  }
+
+  .primary-btn {
+    flex: 1;
+    border: 1.5px solid #fff;
+    background: #fff;
+    color: #0a0a0c;
+    padding: 13px 24px;
+    font-size: 0.95rem;
+    font-weight: 800;
+    letter-spacing: 0.2em;
+    border-radius: 2px;
+    cursor: pointer;
+  }
+
+  .primary-btn:hover {
+    background: rgba(255, 255, 255, 0.86);
+    color: #0a0a0c;
+  }
+
+  .ghost-btn {
+    border: 1.5px solid rgba(255, 255, 255, 0.35);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.75);
+    padding: 13px 22px;
+    font-size: 0.88rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    border-radius: 2px;
+    cursor: pointer;
+  }
+
+  .primary-btn.wide {
+    width: 100%;
+  }
+
+  /* ---- ① 缩放预览 ---- */
+  .scale-preview {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 132px;
+    padding: 16px;
+    border: 1px dashed rgba(255, 255, 255, 0.2);
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.03);
+    overflow: hidden;
+  }
+
+  .preview-card {
     display: flex;
     flex-direction: column;
+    gap: 6px;
+    padding: 12px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .preview-name {
+    font-size: 0.95rem;
+    font-weight: 800;
+  }
+
+  .preview-artist {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.76rem;
+  }
+
+  .preview-levels {
+    display: flex;
+    gap: 4px;
+    margin-top: 2px;
+  }
+
+  .preview-levels span {
+    padding: 1px 5px;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.6rem;
+    font-weight: 700;
+  }
+
+  .preview-levels span.active {
+    background: #fff;
+    color: #0a0a0c;
+  }
+
+  .scale-control {
+    display: flex;
     align-items: center;
     gap: 10px;
-    padding: 0 28px;
-    color: rgba(255, 255, 255, 0.55);
-    font-family: 'Courier New', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-    font-size: clamp(0.72rem, 1.8vw, 0.92rem);
-    letter-spacing: 0.14em;
-    line-height: 1.7;
-    text-align: center;
-    opacity: 0;
-    transition: opacity 0.9s ease;
-    pointer-events: none;
   }
 
-  .disclaimer p {
-    margin: 0;
+  .scale-control input[type='range'] {
+    flex: 1;
+    min-width: 0;
+    accent-color: #fff;
   }
 
-  .disclaimer.on {
-    opacity: 1;
+  .step-btn {
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    background: transparent;
+    color: #fff;
+    font-size: 1rem;
+    font-weight: 700;
+    border-radius: 2px;
+    cursor: pointer;
   }
 
-  /* ---- ② 光敏性癫痫警告 ---- */
-  .warning {
+  .scale-value {
+    flex-shrink: 0;
+    min-width: 52px;
+    text-align: right;
+    color: rgba(255, 255, 255, 0.7);
+    font-family: var(--phi-mono);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---- ② 节点列表 ---- */
+  .node-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .node-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 13px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.04);
+    color: #e8e8e8;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      background 0.16s ease,
+      border-color 0.16s ease;
+  }
+
+  .node-item:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.5);
+    color: #fff;
+  }
+
+  .node-item.selected {
+    border-color: #fff;
+  }
+
+  .node-main {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .node-main strong {
+    font-size: 0.95rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+  }
+
+  .node-main small {
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 0.72rem;
+  }
+
+  .node-item:hover .node-main small {
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .node-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .node-tag {
+    padding: 2px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    color: rgba(255, 255, 255, 0.7);
+    font-family: var(--phi-mono);
+    font-size: 0.6rem;
+    font-style: normal;
+    letter-spacing: 0.12em;
+  }
+
+  .node-ping {
+    min-width: 62px;
+    text-align: right;
+    color: rgba(255, 255, 255, 0.6);
+    font-family: var(--phi-mono);
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .node-ping.good {
+    color: #9fe0ac;
+  }
+
+  .node-ping.bad {
+    color: rgba(255, 160, 160, 0.8);
+  }
+
+  .node-ping.probing {
+    color: rgba(255, 255, 255, 0.35);
+  }
+
+  /* ---- ③ 光敏性警告 ---- */
+  .warning-screen {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
     padding: 0 24px;
     text-align: center;
+    cursor: pointer;
+    outline: none;
+    animation: panel-in 0.5s ease;
   }
 
   .warning-title {
@@ -506,7 +835,7 @@
   }
 
   .warning-text {
-    margin: 0 0 34px;
+    margin: 0 0 30px;
     max-width: 640px;
     color: rgba(255, 255, 255, 0.82);
     font-size: clamp(0.88rem, 2.2vw, 1.05rem);
@@ -514,144 +843,80 @@
     letter-spacing: 0.04em;
   }
 
-  .warning-btn {
-    position: relative;
-    outline: none;
-    border: 1.5px solid #e8e8e8;
-    background: transparent;
-    color: #e8e8e8;
-    padding: 15px 56px;
-    font-size: 1.05rem;
-    font-weight: 800;
-    letter-spacing: 0.35em;
-    text-indent: 0.35em;
-    cursor: pointer;
-    border-radius: 2px;
-    transition:
-      background 0.18s ease,
-      color 0.18s ease,
-      transform 0.1s ease;
+  /* 倒计时进度条：只动 transform，走合成器 */
+  .warning-progress {
+    width: min(260px, 60vw);
+    height: 2px;
+    background: rgba(255, 255, 255, 0.18);
+    overflow: hidden;
   }
 
-  .warning-btn:hover {
-    background: #e8e8e8;
-    color: #000;
-  }
-
-  .warning-btn:active {
-    transform: scale(0.97);
-  }
-
-  /* 呼吸环：只动 transform/opacity，走合成器，避免 box-shadow 每帧主线程重绘掉帧 */
-  .warning-btn::after {
+  .warning-progress::after {
     content: '';
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: #fff;
+    transform-origin: left center;
+    animation: warn-fill var(--warn-ms) linear forwards;
+  }
+
+  @keyframes warn-fill {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: scaleX(1);
+    }
+  }
+
+  .warning-count {
+    margin-top: 12px;
+    color: rgba(255, 255, 255, 0.42);
+    font-family: var(--phi-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.18em;
+  }
+
+  /* ---- ④ 预载 ---- */
+  .preload-screen {
     position: absolute;
-    inset: -7px;
-    border: 1.5px solid rgba(255, 255, 255, 0.55);
-    border-radius: 4px;
-    opacity: 0;
-    transform: scale(0.94);
-    animation: warn-ring 2.4s ease-in-out infinite;
-    pointer-events: none;
-  }
-
-  .warning.leaving .warning-btn::after {
-    animation: none;
-    opacity: 0;
-  }
-
-  @keyframes warn-ring {
-    0%,
-    100% {
-      opacity: 0;
-      transform: scale(0.94);
-    }
-    50% {
-      opacity: 0.9;
-      transform: scale(1.05);
-    }
-  }
-
-  /* ---- ③ Tap To Start ---- */
-  .title-logo.big {
-    height: clamp(72px, 15vh, 120px);
-    margin-bottom: 40px;
-  }
-
-  .tap-to-start {
-    color: #e8e8e8;
-    font-family: 'Courier New', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-    /* 与底部 "PhiCommunity Revive v2.0.0" 接近的大小 */
-    font-size: clamp(0.72rem, 1.7vw, 0.85rem);
-    font-weight: 700;
-    letter-spacing: 0.45em;
-    text-indent: 0.45em;
-    text-shadow: 0 0 24px rgba(255, 255, 255, 0.25);
-    animation: flash 2.4s ease-in-out infinite;
-    display: flex;
-    align-items: center;
-    gap: 0.5em;
-  }
-
-  .dot {
-    font-size: 0.7em;
-    animation: blink 1.2s steps(1) infinite;
-  }
-
-  .dot:last-child {
-    animation-delay: 0.6s;
-  }
-
-  @keyframes flash {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.35;
-    }
-  }
-
-  @keyframes blink {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0;
-    }
-  }
-
-  /* ---- 底部信息 ---- */
-  .info {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 22px;
+    inset: 0;
+    z-index: 10;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
-    color: rgba(255, 255, 255, 0.4);
-    font-family: 'Courier New', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-    font-size: 0.72rem;
-    letter-spacing: 0.12em;
+    justify-content: center;
+    gap: 4px;
+    animation: panel-in 0.4s ease;
+  }
+
+  .preload-hint {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.55);
+    font-family: var(--phi-mono);
+    font-size: clamp(0.72rem, 1.8vw, 0.85rem);
+    letter-spacing: 0.14em;
     text-align: center;
-    padding: 0 16px;
+    padding: 0 20px;
+  }
+
+  /* ---- 遮罩 ---- */
+  .fade-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    background: #000;
     opacity: 0;
-    transition: opacity 0.9s ease;
     pointer-events: none;
+    transition: opacity 0.5s ease;
   }
 
-  .info.on {
+  .fade-overlay.on {
     opacity: 1;
+    pointer-events: auto;
   }
 
-  .ver {
-    color: rgba(255, 255, 255, 0.6);
-  }
-
-  /* ---- 加载完成后的黑屏渐出遮罩（盖在共享 PhigrosLoading 组件上方） ---- */
   .loading-exit {
     position: absolute;
     inset: 0;
@@ -664,47 +929,6 @@
 
   .loading-exit.on {
     opacity: 1;
-    pointer-events: auto;
-  }
-
-  /* ---- 退出黑屏遮罩 ---- */
-  .fade-overlay {
-    position: absolute;
-    inset: 0;
-    background: #000;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.5s ease;
-    z-index: 30;
-  }
-
-  .fade-overlay.on {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  /* ---- 跳过（点击直达终态，禁用一切渐入过渡）---- */
-  .boot.skipping .bg,
-  .boot.skipping .bg-dim,
-  .boot.skipping .scanlines,
-  .boot.skipping .warning,
-  .boot.skipping .credits,
-  .boot.skipping .disclaimer,
-  .boot.skipping .tap,
-  .boot.skipping .info {
-    transition: none;
-  }
-
-  /* ---- Tap To Start 整屏点击区 ---- */
-  .hit-zone {
-    position: absolute;
-    inset: 0;
-    z-index: 20;
-    opacity: 0;
-    pointer-events: none;
-  }
-
-  .hit-zone.on {
     pointer-events: auto;
   }
 </style>

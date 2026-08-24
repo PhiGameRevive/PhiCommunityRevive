@@ -4,70 +4,15 @@
    * 开场动画 → 选歌页、结算/设置/中途退出回到选歌页时共用。
    *
    * - cover/tip 由外部传入（数据未就绪时传默认图）
-   * - progress 0~1 由外部驱动（真实下载进度或计时推进），组件内 rAF 逐帧绘制
+   * - progress 0~1 由外部驱动（真实下载进度或计时推进）
+   * - detail 可选，显示在进度条下方（如"下载游玩素材 12/46"）
    */
-  import { onDestroy, onMount } from 'svelte';
+  import LoadingCanvas from './LoadingCanvas.svelte';
 
   export let cover: string;
   export let tip: string;
   export let progress = 0;
-
-  // 以逻辑像素绘制，backing store 放大 DPR 倍保证文字锐利
-  const W = 340;
-  const H = 160;
-  const DPR = 2;
-
-  let canvas: HTMLCanvasElement | undefined;
-  let animId = 0;
-  let animStart = 0;
-
-  const draw = (now: number) => {
-    const c = canvas;
-    const ctx = c?.getContext('2d');
-    if (!c || !ctx) {
-      // canvas 尚未挂载 → 下一帧重试
-      animId = requestAnimationFrame(draw);
-      return;
-    }
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    const t = (now - animStart) / 15;
-    ctx.clearRect(0, 0, W, H);
-    ctx.font = '34px "Courier New", ui-monospace, monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#ffffff';
-    const msg = 'LOADING';
-    const dxs = ctx.measureText(msg).width;
-    ctx.globalCompositeOperation = 'xor';
-    const hw = 26 + dxs / 2;
-    ctx.fillRect(
-      Math.sin(t / 20) < 0 ? Math.cos(t / 20) * hw + W / 2 : W / 2 - hw,
-      H / 2 - 33,
-      -Math.cos(t / 20) * hw + hw,
-      66,
-    );
-    ctx.fillText(msg, W / 2, H / 2);
-    ctx.globalCompositeOperation = 'source-over';
-    // 进度条（位于 LOADING 字样下方）
-    const barW = hw * 2;
-    const barX = W / 2 - hw;
-    const barY = H / 2 + 45;
-    const barH = 5;
-    const p = Math.min(Math.max(progress, 0), 1);
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.22)';
-    ctx.fillRect(barX, barY, barW, barH);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(barX, barY, barW * p, barH);
-    animId = requestAnimationFrame(draw);
-  };
-
-  onMount(() => {
-    animStart = performance.now();
-    cancelAnimationFrame(animId);
-    animId = requestAnimationFrame(draw);
-  });
-
-  onDestroy(() => cancelAnimationFrame(animId));
+  export let detail = '';
 </script>
 
 <div class="pl-screen">
@@ -75,7 +20,7 @@
   <div class="pl-veil"></div>
   <div class="pl-glass">
     <p class="pl-tip">TIP {tip}</p>
-    <canvas class="pl-canvas" bind:this={canvas} width={W * DPR} height={H * DPR}></canvas>
+    <LoadingCanvas {progress} {detail} />
   </div>
 </div>
 
@@ -143,24 +88,11 @@
     pointer-events: none;
   }
 
-  /* 画布按逻辑像素绘制，CSS 尺寸缩小即可整体缩放 */
-  .pl-canvas {
-    flex-shrink: 0;
-    width: 280px;
-    height: 132px;
-    animation: pl-in 0.3s ease;
-  }
-
   /* 窄屏按比例缩小，避免遮挡 */
   @media (max-width: 860px) {
     .pl-glass {
       gap: 14px;
       padding: 10px 12px;
-    }
-
-    .pl-canvas {
-      width: 210px;
-      height: 99px;
     }
 
     .pl-tip {
@@ -197,17 +129,6 @@
     to {
       opacity: 1;
       transform: translateY(0);
-    }
-  }
-
-  @keyframes pl-in {
-    from {
-      opacity: 0;
-      transform: scale(0.6);
-    }
-    to {
-      opacity: 1;
-      transform: scale(1);
     }
   }
 </style>

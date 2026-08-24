@@ -1,0 +1,572 @@
+<script lang="ts">
+  /**
+   * 新版开场动画（19 秒时间轴，配 TapToStartNew.mp3）。
+   *
+   * 音乐高潮位于 19~20 秒，19.0s 处画面同步炸开：背景揭晓 + Title + TAP TO START + 花瓣飘落。
+   * 高潮之前依次是 logo、免责声明、启动日志、版本卡片，最后 1.6 秒刻意留白到纯黑，
+   * 让高潮命中时的视觉冲击最大化。
+   *
+   * 音频由父组件在"节点选择页点击"这一用户手势中解锁并解码后传入，
+   * 本组件只负责起播与（跳过时的）快进。
+   */
+  import { onDestroy, onMount } from 'svelte';
+  import PetalField from '$lib/components/PetalField.svelte';
+
+  /** 已解锁的 AudioContext 与已解码的音频；任一为空时动画照常走，只是没有声音 */
+  export let actx: AudioContext | null = null;
+  export let buffer: AudioBuffer | null = null;
+  /** 首次启动不允许跳过前摇 */
+  export let canSkip = false;
+  /** 已被上层界面完全遮住（如加载界面）：停掉花瓣绘制，省下无意义的 GPU 开销 */
+  export let occluded = false;
+  export let version = 'v2.0.0';
+  /** 当前部署节点名，显示在版本卡片上 */
+  export let nodeLabel = '';
+  /** 玩家在 TAP TO START 页点击后回调（父组件负责后续黑屏与跳转） */
+  export let onDone: () => void = () => {};
+
+  /* ---------------- 时间轴（秒） ---------------- */
+  const T = {
+    scanlines: 0.4,
+    logoIn: 1.2,
+    logoOut: 4.6,
+    disclaimerIn: 5.0,
+    disclaimerOut: 8.6,
+    bootLogIn: 9.0,
+    bootLogOut: 13.2,
+    versionIn: 13.5,
+    versionOut: 17.4,
+    /** 音乐高潮命中：一切揭晓 */
+    climax: 19.0,
+  };
+
+  /** 启动日志：把刚才真实完成的预载结果亮出来（等宽字体逐字打出） */
+  const BOOT_LOG: { at: number; text: string }[] = [
+    { at: 9.0, text: '> init  phi-community-revive .......... ok' },
+    { at: 9.9, text: '> mount chart sources  (phi/ptc/pz) ... ok' },
+    { at: 10.8, text: '> cache game assets ................... ok' },
+    { at: 11.7, text: '> warm  phaser engine ................. ok' },
+    { at: 12.6, text: '> ready' },
+  ];
+  /** 打字速度（字符/秒） */
+  const TYPE_CPS = 46;
+
+  let elapsed = 0;
+  let animId = 0;
+  let startPerf = 0;
+  /** 跳过时把时间轴整体前移的偏移量 */
+  let baseOffset = 0;
+  let skipped = false;
+  let finished = false;
+
+  let source: AudioBufferSourceNode | null = null;
+  let gain: GainNode | null = null;
+  /** 起播时刻的 AudioContext 时间；有音频时以音频时钟驱动时间轴 */
+  let audioStartTime = 0;
+  let audioPlaying = false;
+
+  /** 起播（offset 为音频内起始秒数，跳过时从高潮前一点开始） */
+  const playAudio = (offset: number) => {
+    if (!actx || !buffer) return;
+    try {
+      const now = actx.currentTime;
+      if (source) {
+        source.onended = null;
+        source.stop(now);
+      }
+      if (!gain) {
+        gain = actx.createGain();
+        // 1.5s 渐入，避免音乐硬切入耳
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.9, now + 1.5);
+        gain.connect(actx.destination);
+      }
+      const s = actx.createBufferSource();
+      s.buffer = buffer;
+      s.loop = true;
+      s.connect(gain);
+      s.start(now, Math.min(offset, buffer.duration - 0.05));
+      source = s;
+      // 记录"音频时间 0 对应的时间轴位置"，用于后续以音频时钟对齐画面
+      audioStartTime = now - offset;
+      audioPlaying = true;
+    } catch (e) {
+      console.warn('intro audio playback failed', e);
+      audioPlaying = false;
+    }
+  };
+
+  /**
+   * 时间轴时钟：有音频时以 AudioContext.currentTime 为准，
+   * 保证 19 秒的高潮命中与音乐严格同步（切后台再回来也不会错位）。
+   * 没有音频时退回 performance.now。
+   */
+  const tick = () => {
+    elapsed =
+      audioPlaying && actx
+        ? actx.currentTime - audioStartTime
+        : baseOffset + (performance.now() - startPerf) / 1000;
+    // 已确认进入选歌页：时间轴不再有用（画面停在终态），停掉逐帧计算
+    if (finished) return;
+    animId = requestAnimationFrame(tick);
+  };
+
+  onMount(() => {
+    startPerf = performance.now();
+    playAudio(0);
+    animId = requestAnimationFrame(tick);
+  });
+
+  onDestroy(() => {
+    cancelAnimationFrame(animId);
+    try {
+      if (source) {
+        source.onended = null;
+        source.stop();
+      }
+    } catch {
+      /* 已停止 */
+    }
+    source = null;
+    gain = null;
+    audioPlaying = false;
+  });
+
+  /** 前摇阶段点击 = 跳过（首启禁用）；高潮之后点击 = 进入选歌页 */
+  const onTap = () => {
+    if (finished) return;
+    if (elapsed < T.climax) {
+      if (!canSkip) return;
+      skipped = true;
+      baseOffset = T.climax;
+      startPerf = performance.now();
+      elapsed = T.climax;
+      playAudio(T.climax);
+      return;
+    }
+    // 刚跳过的瞬间忽略，防止"跳过 + 误触进入"连发
+    if (skipped && elapsed - T.climax < 0.35) return;
+    finished = true;
+    onDone();
+  };
+
+  /** 逐字打出：返回该行当前应显示的文本 */
+  const typed = (line: { at: number; text: string }, t: number): string => {
+    if (t < line.at) return '';
+    const chars = Math.floor((t - line.at) * TYPE_CPS);
+    return line.text.slice(0, chars);
+  };
+
+  // 各段可见性（跳过后 elapsed 直接等于 climax，前摇元素自然全部隐藏）
+  $: showScanlines = elapsed >= T.scanlines;
+  $: showLogo = elapsed >= T.logoIn && elapsed < T.logoOut;
+  $: showDisclaimer = elapsed >= T.disclaimerIn && elapsed < T.disclaimerOut;
+  $: showBootLog = elapsed >= T.bootLogIn && elapsed < T.bootLogOut;
+  $: showVersion = elapsed >= T.versionIn && elapsed < T.versionOut;
+  $: climax = elapsed >= T.climax;
+  /** 收拢留白：版本卡片淡出到高潮之间保持纯黑 */
+  $: showSkipHint = canSkip && !climax && elapsed >= T.logoIn;
+</script>
+
+<!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
+<div
+  class="intro"
+  class:instant={skipped}
+  role="button"
+  tabindex="0"
+  onclick={onTap}
+  onkeydown={(e) => (e.key === ' ' || e.key === 'Enter') && onTap()}
+>
+  <!-- 背景与压暗层：高潮时揭晓 -->
+  <div class="bg" class:on={climax}></div>
+  <div class="bg-dim" class:reveal={climax}></div>
+  <div class="scanlines" class:on={showScanlines}></div>
+
+  <!-- ① logo + 原作者 -->
+  <div class="stage credits" class:on={showLogo}>
+    <div class="credits-icons">
+      <img class="phizone-logo" src="/ui/phizone-icon.png" alt="PhiZone Player" />
+      <img class="title-logo" src="/ui/Title.svg" alt="PhiCommunity" />
+    </div>
+    <div class="credits-line">
+      <span class="credits-label">原作者</span>
+      <span class="credits-name">yuameshi</span>
+    </div>
+  </div>
+
+  <!-- ② 免责声明 -->
+  <div class="stage disclaimer-stage" class:on={showDisclaimer}>
+    <p>本作为 Phigros 同人社区作品，与厦门鸽游网络有限公司无关。</p>
+    <p>全部谱面、音乐与美术资源版权归原作者所有。</p>
+    <p>仅供学习交流，请勿用于商业用途。</p>
+  </div>
+
+  <!-- ③ 启动日志（逐字打出，展示刚完成的预载结果） -->
+  <div class="stage boot-log" class:on={showBootLog}>
+    {#each BOOT_LOG as line}
+      {@const text = typed(line, elapsed)}
+      {#if text}
+        <p class="log-line" class:done={text.length === line.text.length}>
+          {text}<span class="caret" class:hidden={text.length === line.text.length}>_</span>
+        </p>
+      {/if}
+    {/each}
+  </div>
+
+  <!-- ④ 版本卡片 -->
+  <div class="stage version-card" class:on={showVersion}>
+    <span class="vc-label">PHICOMMUNITY REVIVE</span>
+    <strong class="vc-version">{version}</strong>
+    {#if nodeLabel}
+      <span class="vc-node">NODE · {nodeLabel}</span>
+    {/if}
+  </div>
+
+  <!-- ⑤ 高潮：TAP TO START + 花瓣 -->
+  {#if climax && !occluded}
+    <PetalField />
+  {/if}
+
+  <div class="stage tap" class:on={climax}>
+    <img class="title-logo big" src="/ui/Title.svg" alt="PhiCommunity" />
+    <div class="tap-to-start">
+      <span class="dot">▮</span>
+      TAP TO START
+      <span class="dot">▮</span>
+    </div>
+  </div>
+
+  <div class="info" class:on={climax}>
+    <span class="ver">PhiCommunity Revive {version}{nodeLabel ? ` · ${nodeLabel}` : ''}</span>
+    <span class="info-disclaimer">
+      本项目与厦门鸽游网络有限公司（Xiamen Pigeon Games Network Co., Ltd.）没有任何关系
+    </span>
+  </div>
+
+  <!-- 可跳过提示（首次启动不显示） -->
+  <div class="skip-hint" class:on={showSkipHint}>点按以跳过</div>
+</div>
+
+<style>
+  .intro {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    background: #000;
+    user-select: none;
+    cursor: pointer;
+    outline: none;
+  }
+
+  /* ---- 背景 ---- */
+  .bg {
+    position: absolute;
+    inset: -20px;
+    background: url('/ui/ElementSqare.webp') center center no-repeat;
+    background-size: cover;
+    filter: blur(12px) brightness(0.5) contrast(0.9) grayscale(0.25);
+    transform: scale(1.1);
+    opacity: 0;
+    transition: opacity 1.2s ease;
+    pointer-events: none;
+  }
+
+  .bg.on {
+    opacity: 1;
+  }
+
+  .bg-dim {
+    position: absolute;
+    inset: 0;
+    background: #000;
+    opacity: 1;
+    transition: opacity 1.6s ease;
+    pointer-events: none;
+  }
+
+  .bg-dim.reveal {
+    opacity: 0;
+  }
+
+  .scanlines {
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.028) 0px,
+      rgba(255, 255, 255, 0.028) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    opacity: 0;
+    transition: opacity 0.8s ease;
+    pointer-events: none;
+  }
+
+  .scanlines.on {
+    opacity: 1;
+  }
+
+  /* ---- 通用舞台 ---- */
+  .stage {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    opacity: 0;
+    /* 淡出时轻微收拢，配合"向中心聚合"的收尾观感 */
+    transform: scale(0.985);
+    transition:
+      opacity 0.9s ease,
+      transform 1.1s cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
+  }
+
+  .stage.on {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  /* ---- ① logo ---- */
+  .credits-icons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 32px;
+    padding: 0 24px;
+  }
+
+  .phizone-logo {
+    height: 72px;
+    width: auto;
+    max-width: 46vw;
+    object-fit: contain;
+    filter: drop-shadow(0 0 14px rgba(255, 255, 255, 0.2));
+  }
+
+  .title-logo {
+    height: 64px;
+    width: auto;
+    max-width: 78vw;
+    object-fit: scale-down;
+    filter: drop-shadow(0 0 14px rgba(255, 255, 255, 0.22));
+  }
+
+  .credits-line {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-top: 26px;
+    font-family: var(--phi-mono);
+    letter-spacing: 0.18em;
+  }
+
+  .credits-label {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.85rem;
+  }
+
+  .credits-name {
+    color: #fff;
+    font-size: 1.25rem;
+    font-weight: 700;
+    text-shadow: 0 0 18px rgba(255, 255, 255, 0.35);
+  }
+
+  /* ---- ② 免责声明 ---- */
+  .disclaimer-stage {
+    gap: 10px;
+    padding: 0 28px;
+    color: rgba(255, 255, 255, 0.55);
+    font-family: var(--phi-mono);
+    font-size: clamp(0.72rem, 1.8vw, 0.92rem);
+    letter-spacing: 0.14em;
+    line-height: 1.7;
+    text-align: center;
+  }
+
+  .disclaimer-stage p {
+    margin: 0;
+  }
+
+  /* ---- ③ 启动日志 ---- */
+  .boot-log {
+    align-items: flex-start;
+    justify-content: center;
+    gap: 8px;
+    padding: 0 clamp(24px, 12vw, 180px);
+    font-family: var(--phi-mono);
+    font-size: clamp(0.66rem, 1.5vw, 0.86rem);
+    letter-spacing: 0.06em;
+    color: rgba(255, 255, 255, 0.62);
+  }
+
+  .log-line {
+    margin: 0;
+    white-space: pre;
+  }
+
+  .log-line.done {
+    color: rgba(255, 255, 255, 0.82);
+  }
+
+  .caret {
+    animation: caret-blink 0.7s steps(1) infinite;
+  }
+
+  .caret.hidden {
+    visibility: hidden;
+  }
+
+  @keyframes caret-blink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+  }
+
+  /* ---- ④ 版本卡片 ---- */
+  .version-card {
+    gap: 12px;
+    font-family: var(--phi-mono);
+    text-align: center;
+  }
+
+  .vc-label {
+    color: rgba(255, 255, 255, 0.42);
+    font-size: clamp(0.6rem, 1.4vw, 0.72rem);
+    font-weight: 700;
+    letter-spacing: 0.3em;
+  }
+
+  .vc-version {
+    font-size: clamp(2rem, 6vw, 3.4rem);
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-shadow: 0 0 32px rgba(255, 255, 255, 0.28);
+  }
+
+  .vc-node {
+    padding: 5px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    color: rgba(255, 255, 255, 0.6);
+    font-size: clamp(0.58rem, 1.3vw, 0.7rem);
+    letter-spacing: 0.22em;
+  }
+
+  /* ---- ⑤ TAP TO START ---- */
+  .tap {
+    z-index: 18;
+  }
+
+  .title-logo.big {
+    height: clamp(72px, 15vh, 120px);
+    margin-bottom: 40px;
+  }
+
+  .tap-to-start {
+    color: #e8e8e8;
+    font-family: var(--phi-mono);
+    font-size: clamp(0.72rem, 1.7vw, 0.85rem);
+    font-weight: 700;
+    letter-spacing: 0.45em;
+    text-indent: 0.45em;
+    text-shadow: 0 0 24px rgba(255, 255, 255, 0.25);
+    animation: flash 2.4s ease-in-out infinite;
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+  }
+
+  .dot {
+    font-size: 0.7em;
+    animation: blink 1.2s steps(1) infinite;
+  }
+
+  .dot:last-child {
+    animation-delay: 0.6s;
+  }
+
+  @keyframes flash {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  @keyframes blink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+  }
+
+  /* ---- 底部信息 ---- */
+  .info {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 22px;
+    z-index: 18;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    color: rgba(255, 255, 255, 0.4);
+    font-family: var(--phi-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-align: center;
+    padding: 0 16px;
+    opacity: 0;
+    transition: opacity 0.9s ease;
+    pointer-events: none;
+  }
+
+  .info.on {
+    opacity: 1;
+  }
+
+  .ver {
+    color: rgba(255, 255, 255, 0.6);
+  }
+
+  /* ---- 跳过提示 ---- */
+  .skip-hint {
+    position: absolute;
+    right: 24px;
+    bottom: 20px;
+    z-index: 18;
+    color: rgba(255, 255, 255, 0.32);
+    font-family: var(--phi-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.24em;
+    opacity: 0;
+    transition: opacity 0.8s ease;
+    pointer-events: none;
+  }
+
+  .skip-hint.on {
+    opacity: 1;
+  }
+
+  /* 跳过：直达终态，禁用一切渐入过渡 */
+  .intro.instant .bg,
+  .intro.instant .bg-dim,
+  .intro.instant .stage,
+  .intro.instant .info {
+    transition: none;
+  }
+</style>

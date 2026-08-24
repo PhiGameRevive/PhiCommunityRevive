@@ -4,20 +4,43 @@
   import type { Preferences } from '$lib/types';
   import { loadPreferences, savePreferences, DEFAULT_PREFERENCES } from '$lib/preferences';
   import { confirm as confirmModal, prompt as promptModal } from '$lib/modal';
+  import {
+    DEFAULT_UI_SCALE,
+    MAX_UI_SCALE,
+    MIN_UI_SCALE,
+    UI_SCALE_STEP,
+    commitUiScale,
+    loadUiScale,
+  } from '$lib/uiScale';
+  import { loadIntroStyle, saveIntroStyle, type IntroStyle } from '$lib/introStyle';
 
   let prefs: Preferences = { ...DEFAULT_PREFERENCES };
   let autoplay = false;
   let playerName = '';
+  let uiScale = DEFAULT_UI_SCALE;
+  let introStyle: IntroStyle = 'new';
 
   onMount(() => {
     prefs = loadPreferences();
     autoplay = localStorage.getItem('autoplay') === 'true';
     playerName = localStorage.getItem('playerName') ?? 'GUEST';
+    uiScale = loadUiScale();
+    introStyle = loadIntroStyle();
   });
 
   const update = <K extends keyof Preferences>(key: K, value: Preferences[K]) => {
     prefs = { ...prefs, [key]: value };
     savePreferences(prefs);
+  };
+
+  /** 界面缩放：写入 localStorage 并立即把 zoom 应用到 <html>，所见即所得 */
+  const updateUiScale = (value: number) => {
+    uiScale = commitUiScale(value);
+  };
+
+  const updateIntroStyle = (style: IntroStyle) => {
+    introStyle = style;
+    saveIntroStyle(style);
   };
 
   const updateAutoplay = (v: boolean) => {
@@ -100,6 +123,30 @@
   <!-- 界面 -->
   <section class="group">
     <h2 class="group-title">界面</h2>
+    <div class="row">
+      <span class="label">界面大小</span>
+      <span class="value">{Math.round(uiScale * 100)}%</span>
+      <input
+        type="range"
+        class="slider"
+        min={MIN_UI_SCALE}
+        max={MAX_UI_SCALE}
+        step={UI_SCALE_STEP}
+        value={uiScale}
+        oninput={(e) => updateUiScale(Number(e.currentTarget.value))}
+      />
+    </div>
+    <div class="row">
+      <span class="label">开场动画</span>
+      <select
+        class="flat-select"
+        value={introStyle}
+        onchange={(e) => updateIntroStyle(e.currentTarget.value as IntroStyle)}
+      >
+        <option value="new">新版（含花瓣）</option>
+        <option value="legacy">旧版</option>
+      </select>
+    </div>
     <div class="row">
       <span class="label">按键缩放</span>
       <span class="value">{Math.round(prefs.noteSize * 100)}%</span>

@@ -1,14 +1,32 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/state';
+  import { afterNavigate } from '$app/navigation';
+  import { registerSW } from 'virtual:pwa-register';
   import '../app.css';
   import Modal from '$lib/Modal.svelte';
+  import { UI_SCALE_EVENT, applyUiScale, loadUiScale } from '$lib/uiScale';
 
   let isMobile = false;
   let portrait = false;
   let isFullscreen = false;
   // 根路径是开场动画页：竖屏旋转遮罩会盖住开场流程，等进选歌页再提示
   const isIntro = () => page.url.pathname === '/';
+
+  /**
+   * 界面缩放作用在 <html> 上（等价于浏览器页面缩放），因此各页面的
+   * `position: fixed; inset: 0` 全屏容器仍能正确铺满视口。
+   *
+   * 游玩页必须复位为 1：Phaser canvas 的判定坐标依赖真实视口尺寸，
+   * 缩放会让触摸点与判定线错位。
+   *
+   * 用 afterNavigate 而非 `$:`：page 来自 $app/state，在本文件的
+   * 传统响应式语法下不会被追踪，导航后不会重新求值。
+   */
+  const applyScaleForRoute = () => {
+    const scale = window.location.pathname.startsWith('/play') ? 1 : loadUiScale();
+    applyUiScale(scale);
+  };
 
   const check = () => {
     isMobile =
@@ -40,17 +58,27 @@
   };
 
   onMount(() => {
+    // 注册 PWA Service Worker（autoUpdate：新版本下载完成后自动激活）
+    registerSW({ immediate: true });
+    applyScaleForRoute();
     check();
     updateFullscreen();
     window.addEventListener('resize', check);
     window.addEventListener('orientationchange', check);
     document.addEventListener('fullscreenchange', updateFullscreen);
+    // 设置页/开场缩放页实时调整时广播该事件，无需刷新即可生效
+    window.addEventListener(UI_SCALE_EVENT, applyScaleForRoute);
     return () => {
       window.removeEventListener('resize', check);
       window.removeEventListener('orientationchange', check);
       document.removeEventListener('fullscreenchange', updateFullscreen);
+      window.removeEventListener(UI_SCALE_EVENT, applyScaleForRoute);
+      applyUiScale(1);
     };
   });
+
+  // 进入/离开游玩页时切换缩放
+  afterNavigate(applyScaleForRoute);
 </script>
 
 <!-- 手机竖屏：强制横屏提示（开场页除外） -->

@@ -10,6 +10,7 @@
   import { loadPreferences, savePreferences } from '$lib/preferences';
   import { preparePlay, setPendingPlay, type PlaySource } from '$lib/playLoader';
   import { takePreloadedSongLists, peekPreloadedSongLists } from '$lib/preload';
+  import { swPrecacheUrls } from '$lib/swPreload';
   import PhigrosLoading from '$lib/components/PhigrosLoading.svelte';
   import { randomTip } from '$lib/loadingTips';
 
@@ -577,6 +578,9 @@
       // 本地谱面封面是 blob URL，跨刷新失效，只缓存远程 URL
       saveCoverPool(urls.filter((u) => !u.startsWith('blob:')));
       if (pageCover === '/ui/ElementSqare.webp') pickCover();
+      // 把远程封面交给 Service Worker 后台串行预热：
+      // 二次访问选歌页时封面直接命中 Cache Storage 秒显示，离线也能正常渲染列表
+      swPrecacheUrls(urls);
     }
     window.setTimeout(() => {
       pageReveal = true;
@@ -918,7 +922,7 @@
                     class:active={i === current}
                     onclick={() => selectSong(i)}
                   >
-                    <img src={item.illustrationUrl} alt="" />
+                    <img src={item.illustrationUrl} alt="" loading="lazy" decoding="async" />
                     <span>
                       <strong>{item.name}</strong>
                       <small>{item.artist}</small>
@@ -986,7 +990,7 @@
             onpointerdown={(e) => onPointerDown(e, i)}
             onclick={() => selectSong(i)}
           >
-            <img class="thumb" src={item.illustrationUrl} alt="" draggable="false" />
+            <img class="thumb" src={item.illustrationUrl} alt="" draggable="false" loading="lazy" decoding="async" />
             <div class="item-text">
               <span class="item-name">{item.name}</span>
               <span class="item-artist">{item.artist}</span>
@@ -1196,7 +1200,7 @@
         <div class="overview-grid">
           {#each currentList() as item, i}
             <button class="overview-item" class:active={i === current} onclick={() => { selectSong(i); showOverview = false; }}>
-              <img class="overview-img" src={item.illustrationUrl} alt="" draggable="false" />
+              <img class="overview-img" src={item.illustrationUrl} alt="" draggable="false" loading="lazy" decoding="async" />
               <div class="overview-info">
                 <span class="overview-name">{item.name}</span>
                 <span class="overview-artist">{item.artist}</span>
