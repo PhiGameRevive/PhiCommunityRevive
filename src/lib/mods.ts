@@ -7,6 +7,8 @@
  *  - 翻转掩码   chartFlipping（bit1 水平、bit2 垂直）
  *  - 自动游玩   Config.autoplay
  *  - 练习模式   Config.practice（自由跳转 + A/B 循环，播完不结算）
+ *  - 无法失败   Config.noFail（关闭失败判定；AT/PR 隐含开启）
+ *  - 下隐       Config.hidden（音符接近判定线时淡出隐藏）
  *
  * 成绩规则（分数倍率制）：
  *  - 写入记录的分数 = 实际分数 × 所有已启用模组倍率之积
@@ -15,7 +17,7 @@
  */
 import type { Preferences } from './types';
 
-export type ModId = 'EZ' | 'HT' | 'AT' | 'PR' | 'HR' | 'DT' | 'MR' | 'VM';
+export type ModId = 'NF' | 'EZ' | 'HT' | 'AT' | 'PR' | 'HR' | 'DT' | 'HD' | 'MR' | 'VM';
 
 /** 分组：降低难度 / 提升难度 / 特殊（不改变难度）/ 自动（不计分的辅助模式） */
 export type ModCategory = 'reduction' | 'increase' | 'special' | 'auto';
@@ -50,6 +52,15 @@ export const MOD_CATEGORY_LABELS: Record<ModCategory, string> = {
 export const MOD_CATEGORY_ORDER: ModCategory[] = ['reduction', 'increase', 'special', 'auto'];
 
 export const MODS: ModDef[] = [
+  {
+    id: 'NF',
+    short: 'NF',
+    name: '无法失败',
+    description: '失误过多也不会失败',
+    category: 'reduction',
+    scoreMultiplier: 0.5,
+    rankDelta: -1,
+  },
   {
     id: 'EZ',
     short: 'EZ',
@@ -89,6 +100,15 @@ export const MODS: ModDef[] = [
     scoreMultiplier: 1.12,
     rankDelta: 1.5,
     exclusive: 'rate',
+  },
+  {
+    id: 'HD',
+    short: 'HD',
+    name: '下隐 (实验性)',
+    description: '音符接近判定线时淡出隐藏',
+    category: 'increase',
+    scoreMultiplier: 1.1,
+    rankDelta: 1,
   },
   {
     id: 'MR',
@@ -223,6 +243,16 @@ export const isAutoplay = (mods: ModId[]): boolean => mods.includes('AT');
 
 /** 是否启用练习模式（可自由跳转与 A/B 循环，播完不结算） */
 export const isPractice = (mods: ModId[]): boolean => mods.includes('PR');
+
+/**
+ * 是否免于失败判定。
+ * NF 显式开启；AT（程序代打）与 PR（练习）同样不应触发失败。
+ */
+export const isNoFail = (mods: ModId[]): boolean =>
+  mods.includes('NF') || mods.includes('AT') || mods.includes('PR');
+
+/** 是否启用下隐（音符接近判定线时淡出隐藏） */
+export const isHidden = (mods: ModId[]): boolean => mods.includes('HD');
 
 /** 分数倍率（所有已启用模组之积）；0 表示不记录成绩 */
 export const getScoreMultiplier = (mods: ModId[]): number =>

@@ -52,6 +52,12 @@
   let loopA: number | null = null;
   let loopB: number | null = null;
 
+  /* ---- 失败演出 ---- */
+  /** 失败流程已开始（红光渐现、音频减速中） */
+  let failing = false;
+  /** 减速结束，展示仅含重开/退出的失败界面 */
+  let showFailed = false;
+
   const setLoopA = () => {
     const scene = gameRef.scene;
     if (!scene) return;
@@ -155,6 +161,20 @@
     EventBus.on('finished', () => {
       status = GameStatus.FINISHED;
     });
+
+    // 失败演出开始：音频减速的同时红光渐现
+    EventBus.on('failing', () => {
+      status = GameStatus.FAILED;
+      failing = true;
+      showPause = false;
+    });
+
+    // 减速结束：展示仅含重开/退出的失败界面
+    EventBus.on('failed', () => {
+      status = GameStatus.FAILED;
+      failing = true;
+      showFailed = true;
+    });
   });
 
   onDestroy(async () => {
@@ -188,11 +208,23 @@
       }, 1000);
     }
   };
+  const restart = () => {
+    setTimeout(() => {
+      showPause = false;
+      showFailed = false;
+    }, 500);
+    failing = false;
+    status = GameStatus.LOADING;
+    gameRef.scene?.restart();
+  };
 </script>
 
 <svelte:head>
   <title>{title && level ? `${title} [${level}] | PhiCommunity` : '游玩 - PhiCommunity'}</title>
 </svelte:head>
+
+<!-- 失败红光：屏幕四周渐现的红色晕影 -->
+<div class="fail-vignette" class:on={failing} aria-hidden="true"></div>
 
 <div class="countdown-layer">
   <div class="countdown" class:visible={countdown > 0 && status === GameStatus.PLAYING}>
@@ -205,11 +237,13 @@
   class:overlay-hidden={status === GameStatus.LOADING ||
     status === GameStatus.PLAYING ||
     status === GameStatus.FINISHED ||
+    (status === GameStatus.FAILED && !showFailed) ||
     progressBarHeld ||
     keyboardSeeking}
   class:overlay-passive={status === GameStatus.LOADING ||
     status === GameStatus.PLAYING ||
     status === GameStatus.FINISHED ||
+    (status === GameStatus.FAILED && !showFailed) ||
     keyboardSeeking}
 >
   {#if showStart}
@@ -279,19 +313,18 @@
 
       <div class="pause-actions">
         <button class="btn btn-round" title="退出" onclick={exit}>✕</button>
-        <button
-          class="btn btn-wide"
-          onclick={() => {
-            setTimeout(() => {
-              showPause = false;
-            }, 500);
-            status = GameStatus.LOADING;
-            gameRef.scene?.restart();
-          }}
-        >
-          重新开始
-        </button>
+        <button class="btn btn-wide" onclick={restart}>重新开始</button>
         <button class="btn btn-wide" onclick={resume}>继续</button>
+      </div>
+    </div>
+  {:else if showFailed}
+    <!-- 失败：只提供重新开始与退出，不能继续 -->
+    <div class="overlay-card">
+      <h2 class="fail-title">FAILED</h2>
+      <p class="fail-hint">失误过多，本次游玩已结束</p>
+      <div class="pause-actions">
+        <button class="btn btn-round" title="退出" onclick={exit}>✕</button>
+        <button class="btn btn-wide" onclick={restart}>重新开始</button>
       </div>
     </div>
   {/if}
@@ -315,6 +348,7 @@
         status === GameStatus.READY ||
         status === GameStatus.PLAYING ||
         status === GameStatus.FINISHED ||
+        status === GameStatus.FAILED ||
         timeSec === duration}
       onpointerdown={() => {
         progressBarHeld = true;
@@ -371,16 +405,7 @@
     {/if}
   </div>
   <div class="finished-actions">
-    <button
-      class="btn btn-round"
-      title="重新开始"
-      onclick={() => {
-        status = GameStatus.LOADING;
-        gameRef.scene?.restart();
-      }}
-    >
-      ⟳
-    </button>
+    <button class="btn btn-round" title="重新开始" onclick={restart}>⟳</button>
     <button class="btn btn-round" title="返回选歌" onclick={exit}>✕</button>
   </div>
 {/if}
@@ -467,6 +492,56 @@
     font-weight: bold;
     text-transform: uppercase;
     margin: 0;
+  }
+
+  /* ---- 失败 ---- */
+  .fail-title {
+    margin: 0;
+    font-size: clamp(2.6rem, 9vw, 4.5rem);
+    font-weight: 900;
+    letter-spacing: 0.16em;
+    color: #ffb4b4;
+    text-shadow: 0 0 36px rgba(255, 70, 70, 0.55);
+    animation: fail-in 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .fail-hint {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 0.9rem;
+    letter-spacing: 0.08em;
+  }
+
+  @keyframes fail-in {
+    from {
+      opacity: 0;
+      transform: scale(1.12);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  /* 屏幕四周渐现的红色晕影；只动 opacity，走合成器 */
+  .fail-vignette {
+    position: fixed;
+    inset: 0;
+    z-index: 15;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 1.2s ease;
+    background:
+      radial-gradient(
+        ellipse at center,
+        rgba(255, 0, 0, 0) 38%,
+        rgba(200, 0, 0, 0.32) 78%,
+        rgba(150, 0, 0, 0.62) 100%
+      );
+  }
+
+  .fail-vignette.on {
+    opacity: 1;
   }
 
   /* 练习模式的标题更长（含"练习模式"前缀），缩小避免窄屏溢出 */

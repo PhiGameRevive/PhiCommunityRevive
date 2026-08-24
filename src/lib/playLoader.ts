@@ -32,7 +32,15 @@ import {
 } from '$lib/chartArchive';
 import { fetchPzChartAssets } from '$lib/phizone';
 import { fetchSongs, type ChartSourceId } from '$lib/sources';
-import { applyModsToPreferences, isAutoplay, isPractice, loadMods, type ModId } from '$lib/mods';
+import {
+  applyModsToPreferences,
+  isAutoplay,
+  isHidden,
+  isNoFail,
+  isPractice,
+  loadMods,
+  type ModId,
+} from '$lib/mods';
 import type { Config, PhiraExtra, Preferences } from '$lib/types';
 import { clamp, inferLevelType } from '$lib/utils';
 
@@ -514,6 +522,8 @@ const makeConfig = (params: {
   resourcePack: DEFAULT_RESOURCE_PACK,
   autoplay: isAutoplay(params.mods),
   practice: isPractice(params.mods),
+  noFail: isNoFail(params.mods),
+  hidden: isHidden(params.mods),
   adjustOffset: false,
   render: false,
   autostart: true,

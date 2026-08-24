@@ -18,7 +18,7 @@ import { clamp, isDebug } from '$lib/utils';
 import { calculateValue, ControlTypes, easing, getTimeSec, rgbToHex } from '../utils';
 import type { Game } from '../scenes/Game';
 import type { Line } from './Line';
-import { NOTE_BASE_SIZE, NOTE_PRIORITIES } from '../constants';
+import { NOTE_BASE_SIZE, NOTE_PRIORITIES, hiddenAlphaFactor } from '../constants';
 
 export class PlainNote extends SkewImage {
   private _scene: Game;
@@ -109,6 +109,18 @@ export class PlainNote extends SkewImage {
       (this._data.alpha *
         this.getControlValue(chartDist, ControlTypes.ALPHA, this._line.data.alphaControl)) /
       255;
+    // 下隐（HD）：临近打击时刻逐渐淡出。
+    // 用「距打击还剩多少秒」而非距离：距离会让高速音符几帧内穿过淡出区间、
+    // 看起来是凭空消失；按时间衡量则任何速度的音符淡出观感一致。
+    // 两类音符不参与：
+    //  - isFake 装饰性音符：隐藏它们不增加难度，只是劣化观感
+    //  - 所属判定线不可见（附着 UI / 透明度为 0 / 负透明度隐藏）：
+    //    此时音符位置是玩家唯一的打击参照，再藏掉就完全没法打了
+    // 仅在启用时调用 setAlpha —— 未启用时保持原有的「由 updateJudgment 应用透明度」行为不变。
+    if (this._scene.hidden && !this._data.isFake && this._line.isVisibleReference) {
+      this._alpha *= hiddenAlphaFactor(this._hitTime - songTime);
+      this.setAlpha(this._alpha);
+    }
     this.resize(chartDist);
     if (this._beatJudged && beat < this._beatJudged) {
       this._scene.judgment.unjudge(this);

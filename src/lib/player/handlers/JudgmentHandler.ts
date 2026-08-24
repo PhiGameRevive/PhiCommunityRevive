@@ -117,6 +117,8 @@ export class JudgmentHandler {
       this._scene.statistics.combo = 0;
     }
     this._scene.statistics.updateRecords();
+    // 生命值增减与失败判定（noFail 下为空操作）
+    this._scene.applyJudgmentToLife(type);
     if (delta) {
       this._judgmentDeltas.push({ delta, beat });
     }

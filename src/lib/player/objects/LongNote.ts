@@ -13,6 +13,7 @@ import {
   HOLD_TAIL_TOLERANCE,
   NOTE_BASE_SIZE,
   NOTE_PRIORITIES,
+  hiddenAlphaFactor,
 } from '../constants';
 import { isDebug } from '$lib/utils';
 
@@ -133,6 +134,14 @@ export class LongNote extends GameObjects.Container {
     this._head.setY(this._yModifier * headDist);
     this._body.setY(this._yModifier * (this._line.data.isCover ? Math.max(0, headDist) : headDist));
     this._tail.setY(this._yModifier * tailDist);
+    // 下隐（HD）：按「距头部打击还剩多少秒」整体淡出（与 PlainNote 同一套阈值）。
+    // 两类音符不参与：isFake 装饰性音符；所属判定线不可见（此时音符是唯一的打击参照）。
+    // 头部越线后不再继续压暗，否则长按期间会完全看不见。
+    if (this._scene.hidden && !this._data.isFake && this._line.isVisibleReference) {
+      const factor =
+        beat > this._data.startBeat ? 1 : hiddenAlphaFactor(this._hitTime - songTime);
+      this.setAlpha((this._data.alpha / 255) * factor);
+    }
     const bodyHeight =
       -this._yModifier *
       (this._line.data.isCover

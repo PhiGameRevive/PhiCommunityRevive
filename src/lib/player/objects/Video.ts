@@ -7,6 +7,7 @@ import { GameObjects } from 'phaser';
 import { Game } from '../scenes/Game';
 import type { AnimatedVariable, Bpm, VariableEvent, Video as VideoType } from '$lib/types';
 import { getTimeSec, getEventValue, processEvents, toBeats } from '../utils';
+import { clampPlaybackRate } from '../constants';
 import { Signal } from './Signal';
 import { m } from '$lib/messages';
 
@@ -145,7 +146,8 @@ export class Video extends GameObjects.Container {
       this._video.resume();
       this._isPlaying = true;
     }
-    this._video.setPlaybackRate(this._scene.timeScale);
+    // 失败演出会把 timeScale 压到接近 0，低于浏览器下限会抛 NotSupportedError
+    this._video.setPlaybackRate(clampPlaybackRate(this._scene.timeScale));
     if (typeof this._data.alpha === 'number') {
       this.setAlpha(this._data.alpha);
     } else {

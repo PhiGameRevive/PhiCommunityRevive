@@ -19,6 +19,7 @@ import {
 } from '../utils';
 import {
   GameStatus,
+  JudgmentType,
   type Bpm,
   type Config,
   type GameObject,
@@ -47,7 +48,15 @@ import { Clock } from '../services/clock';
 import { HtmlAudioSong, type SongLike } from '../services/htmlAudioSong';
 import { ResourcePackHandler } from '../handlers/ResourcePackHandler';
 import { m } from '$lib/messages';
-import { HOLD_TAIL_TOLERANCE } from '../constants';
+import {
+  FAIL_SLOWDOWN_MS,
+  HOLD_TAIL_TOLERANCE,
+  LIFE_PENALTY_BAD,
+  LIFE_PENALTY_MISS,
+  LIFE_RECOVER_GOOD,
+  LIFE_RECOVER_PERFECT,
+  clampPlaybackRate,
+} from '../constants';
 
 const JUDGMENT_END_GRACE_SEC = 0.2;
 
@@ -124,6 +133,9 @@ export class Game extends Scene {
   private _numberOfNotes: number;
   private _autoplay = false;
   private _practice = false;
+  private _noFail = false;
+  /** 下隐（HD 模组）：音符接近判定线时淡出隐藏 */
+  private _hidden = false;
   private _autostart = false;
   private _adjustOffset = false;
   private _render = false;
@@ -159,6 +171,11 @@ export class Game extends Scene {
    */
   private _loopA: number | null = null;
   private _loopB: number | null = null;
+
+  /** 生命值（1 → 0）。降到 0 触发失败；noFail 时不参与判定。 */
+  private _life: number = 1;
+  /** 失败演出的起始时间戳（performance.now），用于线性减速 */
+  private _failStart: number | undefined;
 
   private _fonts: Record<string, string> = {};
 
@@ -219,6 +236,9 @@ export class Game extends Scene {
         : this._data.metadata.level;
     this._autoplay = this._data.autoplay;
     this._practice = this._data.practice;
+    // AT / PR 已在 mods 层隐含开启 noFail，这里再兜一层，避免外链参数遗漏
+    this._noFail = this._data.noFail === true || this._data.autoplay || this._data.practice;
+    this._hidden = this._data.hidden === true;
     this._autostart = this._data.autostart;
     this._adjustOffset = this._data.adjustOffset;
     this._render = false;
@@ -539,6 +559,8 @@ export class Game extends Scene {
 
   pause(emittedBySpace: boolean = false) {
     if (this._status === GameStatus.ERROR || !this._song.isPlaying) return;
+    // 失败演出期间不接受暂停（减速动画需要跑完）
+    if (this._status === GameStatus.FAILED) return;
     clearTimeout(this._timeout);
     this._status = GameStatus.PAUSED;
     if (!this._render) this._clock.pause();
@@ -555,6 +577,8 @@ export class Game extends Scene {
 
   resume() {
     if (this._status === GameStatus.ERROR) return;
+    // 失败后只能重开或退出，不允许继续
+    if (this._status === GameStatus.FAILED) return;
     this.updateChart(this.beat, this.timeSec, Date.now());
     this._status = GameStatus.PLAYING;
     if (!this._render) this._clock.resume();
@@ -576,6 +600,9 @@ export class Game extends Scene {
     this._keyboardHandler?.reset();
     this._judgmentHandler.reset();
     this._clock.setSeek(0);
+    // 失败演出会把播放速率降到 0，重开前必须复位，否则新一轮开局即静止
+    this._life = 1;
+    this._failStart = undefined;
     this._resultsUI?.destroy();
     this._resultsUI = undefined;
     this.resetShadersAndVideos();
@@ -583,10 +610,12 @@ export class Game extends Scene {
     await this.initializeVideos();
     this.sortObjects();
     this.in();
-    if (!this._render)
+    if (!this._render) {
+      this.timeScale = this._data.preferences.timeScale;
       this._timeout = setTimeout(() => {
         this._clock.play();
       }, 1000 / this.tweens.timeScale);
+    }
     this._status = GameStatus.PLAYING;
     EventBus.emit('started');
     send({
@@ -597,8 +626,89 @@ export class Game extends Scene {
     });
   }
 
+  /* ---------------- 失败判定与演出 ---------------- */
+
+  /**
+   * 按判定结果增减生命值。降到 0 时触发失败。
+   * noFail（NF / AT / PR）下完全不参与。
+   */
+  applyJudgmentToLife(type: JudgmentType) {
+    if (this._noFail || this._render) return;
+    if (this._status !== GameStatus.PLAYING) return;
+    switch (type) {
+      case JudgmentType.MISS:
+        this._life -= LIFE_PENALTY_MISS;
+        break;
+      case JudgmentType.BAD:
+        this._life -= LIFE_PENALTY_BAD;
+        break;
+      case JudgmentType.PERFECT:
+        this._life += LIFE_RECOVER_PERFECT;
+        break;
+      case JudgmentType.GOOD_EARLY:
+      case JudgmentType.GOOD_LATE:
+        this._life += LIFE_RECOVER_GOOD;
+        break;
+      default:
+        return;
+    }
+    this._life = Math.min(Math.max(this._life, 0), 1);
+    EventBus.emit('life', this._life);
+    if (this._life <= 0) this.fail();
+  }
+
+  /**
+   * 触发失败：进入 FAILED 状态，由 update 逐帧把播放速率降到 0；
+   * 减速结束后再发 'failed'，让 UI 展示红光与仅含重开/退出的暂停界面。
+   */
+  fail() {
+    if (this._status !== GameStatus.PLAYING) return;
+    clearTimeout(this._timeout);
+    this._status = GameStatus.FAILED;
+    this._failStart = performance.now();
+    EventBus.emit('failing');
+  }
+
+  /** 逐帧推进失败减速：速率线性降到浏览器下限，随后暂停时钟并通知 UI */
+  private updateFailing() {
+    if (this._status !== GameStatus.FAILED || this._failStart === undefined) return;
+    const elapsed = performance.now() - this._failStart;
+    const ratio = Math.min(elapsed / FAIL_SLOWDOWN_MS, 1);
+    if (ratio < 1) {
+      // 走 timeScale setter：时钟与背景视频（每帧读 scene.timeScale）一起减速。
+      // 必须钳到 MIN_PLAYBACK_RATE 以上：HTMLMediaElement.playbackRate 低于
+      // 浏览器下限（Chromium 为 1/16）会抛 NotSupportedError。
+      this.timeScale = clampPlaybackRate(this._data.preferences.timeScale * (1 - ratio));
+      return;
+    }
+    this._failStart = undefined;
+    this._clock.pause();
+    this._videos?.forEach((video) => video.pause());
+    EventBus.emit('failed');
+    send({
+      type: 'event',
+      payload: {
+        name: 'failed',
+      },
+    });
+  }
+
+  public get life() {
+    return this._life;
+  }
+
+  public get noFail() {
+    return this._noFail;
+  }
+
+  public get hidden() {
+    return this._hidden;
+  }
+
   end() {
     if (this._status === GameStatus.ERROR) return;
+    // 失败演出进行中/已失败：不再走结算
+    if (this._status === GameStatus.FAILED) return;
     // 练习模式：播完不结算，改为停在暂停界面，玩家可继续跳转或主动退出。
     // 不能直接复用 pause()：歌曲已播完，isPlaying 为 false 会让它提前 return。
     if (this._practice) {
@@ -702,6 +812,8 @@ export class Game extends Scene {
       this._clock.update();
       // 练习模式的 A/B 循环：紧跟时钟推进判断，越过 B 点即跳回 A 点
       this.applyPracticeLoop();
+      // 失败演出：把播放速率逐帧降到 0
+      this.updateFailing();
     }
     if (this._resultsUI) this._resultsUI.update();
     const status = this._status;
@@ -1148,14 +1260,16 @@ export class Game extends Scene {
 
   public set timeScale(value: number) {
     this._timeScale = value;
+    // 传给音频/媒体元素的速率必须在浏览器支持区间内（失败演出会趋近 0）
+    const rate = clampPlaybackRate(value);
     if (this._autoplay) {
-      this.sound.setRate(value);
-      this._clock.setRate(value);
+      this.sound.setRate(rate);
+      this._clock.setRate(rate);
       this.anims.globalTimeScale = value;
       this.tweens.timeScale = value;
       this._clock.sync();
     } else {
-      this._clock.setRate(value);
+      this._clock.setRate(rate);
     }
   }
 

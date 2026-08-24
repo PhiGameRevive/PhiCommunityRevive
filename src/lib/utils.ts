@@ -229,6 +229,8 @@ export const getParams = (url?: string, loadFromStorage = true): Config | null =
 
   const autoplay = ['1', 'true'].some((v) => v == p.get('autoplay'));
   const practice = ['1', 'true'].some((v) => v == p.get('practice'));
+  const noFail = ['1', 'true'].some((v) => v == p.get('noFail'));
+  const hidden = ['1', 'true'].some((v) => v == p.get('hidden'));
   const adjustOffset = ['1', 'true'].some((v) => v == p.get('adjustOffset'));
   const render = false;
   const autostart = ['1', 'true'].some((v) => v == p.get('autostart'));
@@ -302,6 +304,8 @@ export const getParams = (url?: string, loadFromStorage = true): Config | null =
     resourcePack,
     autoplay,
     practice,
+    noFail,
+    hidden,
     adjustOffset,
     render,
     autostart,

@@ -13,6 +13,10 @@ export interface Config {
   resourcePack: ResourcePack<string>;
   autoplay: boolean;
   practice: boolean;
+  /** 关闭失败判定（NF 模组；AT/PR 隐含开启） */
+  noFail?: boolean;
+  /** 下隐（HD 模组）：音符接近判定线时淡出隐藏 */
+  hidden?: boolean;
   adjustOffset: boolean;
   render: boolean;
   autostart: boolean;
@@ -323,6 +327,8 @@ export enum GameStatus {
   PAUSED,
   FINISHED,
   DESTROYED,
+  /** 失败：音频减速停止、红光渐显，随后展示仅含重开/退出的暂停界面 */
+  FAILED,
 }
 
 export enum JudgmentType {

@@ -730,6 +730,17 @@ export class Line {
     return this._opacity;
   }
 
+  /**
+   * 判定线本身此刻是否真的被绘制出来。
+   *
+   * 谱面里存在大量纯装饰判定线：附着 UI 的线、透明度事件压到 0 的线、
+   * 按 Phigros 约定用负透明度隐藏的线。这些线看不见，音符的位置就是玩家
+   * 唯一的打击参照——HD 下隐若再把音符藏掉，等于什么线索都不剩。
+   */
+  public get isVisibleReference() {
+    return this._line.visible && this._opacity > 0;
+  }
+
   public get incline() {
     return this._incline;
   }

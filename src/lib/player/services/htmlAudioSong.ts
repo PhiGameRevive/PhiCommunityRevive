@@ -4,6 +4,8 @@
  * Phaser HTML5AudioFile 又会 XHR 下载整文件导致大文件崩溃）。
  * 实现与 Clock 兼容的接口。
  */
+import { clampPlaybackRate } from '../constants';
+
 export class HtmlAudioSong {
   private _audio: HTMLAudioElement;
   private _endedCallbacks: (() => void)[] = [];
@@ -35,7 +37,8 @@ export class HtmlAudioSong {
   }
 
   setRate(rate: number) {
-    this._audio.playbackRate = rate;
+    // 低于浏览器下限（Chromium 为 1/16）会抛 NotSupportedError
+    this._audio.playbackRate = clampPlaybackRate(rate);
   }
 
   setVolume(volume: number) {

@@ -76,6 +76,55 @@ export const KEYBOARD_INPUT_REGEX = /^[0-9a-z`\-=[\]\\;',./ ]$/;
 */
 export const MOBILE_MAX_IMAGE_DIMENSION = 2048;
 
+/*
+    失败判定：生命值从 1 开始，MISS 与 BAD 各扣除下列比例，
+    Perfect / Good 会回复少量生命。降到 0 即触发失败（NF / AT / PR 模组下不启用）。
+*/
+export const LIFE_PENALTY_MISS = 0.06;
+export const LIFE_PENALTY_BAD = 0.03;
+export const LIFE_RECOVER_PERFECT = 0.012;
+export const LIFE_RECOVER_GOOD = 0.006;
+
+/*
+    失败演出：音频在此时长内线性减速至停止（毫秒）。
+*/
+export const FAIL_SLOWDOWN_MS = 1200;
+
+/*
+    HTMLMediaElement.playbackRate 的合法区间。
+    低于 MIN_PLAYBACK_RATE（Chromium 的 kMinRate = 1/16）会抛
+    NotSupportedError，因此减速演出与倍速模组都必须在此范围内取值。
+*/
+export const MIN_PLAYBACK_RATE = 0.0625;
+export const MAX_PLAYBACK_RATE = 16;
+
+/** 把播放速率钳制到浏览器支持的区间 */
+export const clampPlaybackRate = (rate: number): number => {
+  if (!Number.isFinite(rate)) return 1;
+  return Math.min(Math.max(rate, MIN_PLAYBACK_RATE), MAX_PLAYBACK_RATE);
+};
+
+/*
+    下隐（HD）模组：音符接近判定线时淡出隐藏。
+
+    阈值按「距打击还有多少秒」而非距离衡量。距离会让淡出时长随音符速度变化——
+    高速音符（或含 speed 事件的谱面）几帧就能穿过整个淡出区间，看起来是凭空消失
+    而非渐隐。改用时间后，任何速度的音符淡出观感一致。
+*/
+export const HIDDEN_FADE_START_SEC = 0.75;
+export const HIDDEN_FADE_END_SEC = 0.38;
+
+/**
+ * 下隐模组的透明度系数。
+ * @param secToHit 距打击时刻还有多少秒（已过打击点时为负）
+ */
+export const hiddenAlphaFactor = (secToHit: number): number => {
+  if (!Number.isFinite(secToHit)) return 1;
+  if (secToHit >= HIDDEN_FADE_START_SEC) return 1;
+  if (secToHit <= HIDDEN_FADE_END_SEC) return 0;
+  return (secToHit - HIDDEN_FADE_END_SEC) / (HIDDEN_FADE_START_SEC - HIDDEN_FADE_END_SEC);
+};
+
 export const DEFAULT_RESOURCE_PACK_ID = '__default__';
 
 /*
