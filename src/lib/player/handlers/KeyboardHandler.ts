@@ -19,9 +19,10 @@ export class KeyboardHandler {
   constructor(scene: Game) {
     this._scene = scene;
 
+    // 空格总是注册：前奏倒计时可跳过时优先触发跳过，其余模式走各自的暂停逻辑
+    this._scene.input.keyboard?.on('keydown-SPACE', this.handleSpaceDown, this);
 
     if (this._scene.autoplay || this._scene.practice || this._scene.replay) {
-      this._scene.input.keyboard?.on('keydown-SPACE', this.handleSpaceDown, this);
       this._scene.input.keyboard?.on('keydown-LEFT', this.handleLeftArrowDown, this);
       this._scene.input.keyboard?.on('keydown-RIGHT', this.handleRightArrowDown, this);
       this._scene.input.keyboard?.on('keydown-SHIFT', this.handleShiftDown, this);
@@ -68,6 +69,17 @@ export class KeyboardHandler {
   }
 
   handleSpaceDown() {
+    // 前奏/尾奏可跳过时，空格优先触发跳过（任何模式都生效）
+    if (this._scene.skipIntroAvailable) {
+      this._scene.skipIntro();
+      return;
+    }
+    if (this._scene.skipOutroAvailable) {
+      this._scene.skipOutro();
+      return;
+    }
+    // 普通游玩：空格不参与暂停（保持原有行为；空格仍作为键盘打击键）
+    if (!(this._scene.autoplay || this._scene.practice || this._scene.replay)) return;
     if (this._scene.status === GameStatus.PLAYING) {
       if (this._scene.practice && !this._isShiftDown) return;
       this._scene.pause(true);

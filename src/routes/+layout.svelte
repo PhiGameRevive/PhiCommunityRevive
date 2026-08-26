@@ -9,6 +9,8 @@
   let isMobile = false;
   let portrait = false;
   let isFullscreen = false;
+  /** 弹窗小窗（MW/WW 浮窗）：opener 存在，忽略旋转/全屏引导 */
+  let isPopupWindow = false;
 
   /**
    * 界面缩放作用在 <html> 上（等价于浏览器页面缩放），因此各页面的
@@ -26,6 +28,8 @@
   };
 
   const check = () => {
+    // 弹窗小窗（window.open 打开、存在 opener）内不引导旋转/全屏
+    isPopupWindow = !!window.opener;
     isMobile =
       /Android|iPhone|iPad|iPod|Mobile|HarmonyOS/i.test(navigator.userAgent) ||
       navigator.maxTouchPoints > 1;
@@ -78,8 +82,8 @@
   afterNavigate(applyScaleForRoute);
 </script>
 
-<!-- 手机竖屏：每次启动（含开场流程）都提示横屏；旋转设备后自动消失 -->
-{#if isMobile && portrait}
+<!-- 手机竖屏：每次启动（含开场流程）都提示横屏；旋转设备后自动消失（弹窗小窗除外） -->
+{#if isMobile && portrait && !isPopupWindow}
   <div class="rotate-overlay">
     <div class="rotate-icon"></div>
     <p class="rotate-title">请横屏游玩</p>

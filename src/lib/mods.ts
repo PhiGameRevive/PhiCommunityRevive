@@ -9,6 +9,11 @@
  *  - 练习模式   Config.practice（自由跳转 + A/B 循环，播完不结算）
  *  - 无法失败   Config.noFail（关闭失败判定；AT/PR 隐含开启）
  *  - 下隐       Config.hidden（音符接近判定线时淡出隐藏）
+ *  - 全连/暴毙  Config.perfectFail / suddenDeath（特定判定直接失败）
+ *  - 上隐       Config.sudden（音符出现时间缩短）
+ *  - 无线       Config.noLines（隐藏判定线）
+ *  - 关背景     Config.blackout（隐藏曲绘背景）
+ *  - 残血/复活  Config.lowLife / resurrect（开局生命值 / 失败半血续一次）
  *
  * 成绩规则（分数倍率制）：
  *  - 写入记录的分数 = 实际分数 × 所有已启用模组倍率之积
@@ -17,7 +22,28 @@
  */
 import type { Preferences } from './types';
 
-export type ModId = 'NF' | 'EZ' | 'HT' | 'AT' | 'PR' | 'HR' | 'DT' | 'HD' | 'MR' | 'VM';
+export type ModId =
+  | 'NF'
+  | 'EZ'
+  | 'HT'
+  | 'AT'
+  | 'PR'
+  | 'HR'
+  | 'DT'
+  | 'HD'
+  | 'MR'
+  | 'VM'
+  | 'PF'
+  | 'SD'
+  | 'SU'
+  | 'HP'
+  | 'NL'
+  | 'RS'
+  | 'RR'
+  | 'BL'
+  | 'MW'
+  | 'WW'
+  | 'DB';
 
 /** 分组：降低难度 / 提升难度 / 特殊（不改变难度）/ 自动（不计分的辅助模式） */
 export type ModCategory = 'reduction' | 'increase' | 'special' | 'auto';
@@ -35,6 +61,8 @@ export interface ModDef {
   rankDelta: number;
   /** 互斥组：同组内只能启用一个 */
   exclusive?: string;
+  /** 仅桌面端可用（依赖 window.open 弹窗与 window.moveTo，移动端/Safari 无效） */
+  desktopOnly?: boolean;
 }
 
 export const MOD_CATEGORY_LABELS: Record<ModCategory, string> = {
@@ -82,6 +110,15 @@ export const MODS: ModDef[] = [
     exclusive: 'rate',
   },
   {
+    id: 'RS',
+    short: 'RS',
+    name: '复活',
+    description: '生命耗尽时半血复活一次，继续游玩',
+    category: 'reduction',
+    scoreMultiplier: 0.8,
+    rankDelta: -1,
+  },
+  {
     id: 'HR',
     short: 'HR',
     name: '硬核',
@@ -111,6 +148,53 @@ export const MODS: ModDef[] = [
     rankDelta: 1,
   },
   {
+    id: 'PF',
+    short: 'PF',
+    name: '全连 (实验性)',
+    description: '出现非 PERFECT 判定立即失败',
+    category: 'increase',
+    scoreMultiplier: 1.08,
+    rankDelta: 1,
+    exclusive: 'precision',
+  },
+  {
+    id: 'SD',
+    short: 'SD',
+    name: '暴毙',
+    description: '任意 MISS 立即失败',
+    category: 'increase',
+    scoreMultiplier: 1.05,
+    rankDelta: 0.5,
+    exclusive: 'precision',
+  },
+  {
+    id: 'SU',
+    short: 'SU',
+    name: '上隐 (实验性)',
+    description: '音符出现时间缩短为 40%，更考验读谱',
+    category: 'increase',
+    scoreMultiplier: 1.08,
+    rankDelta: 0.5,
+  },
+  {
+    id: 'HP',
+    short: 'HP',
+    name: '残血',
+    description: '开局生命仅 30%，容错极低',
+    category: 'increase',
+    scoreMultiplier: 1.05,
+    rankDelta: 0.5,
+  },
+  {
+    id: 'NL',
+    short: 'NL',
+    name: '无线 (实验性)',
+    description: '隐藏全部判定线，仅剩音符',
+    category: 'increase',
+    scoreMultiplier: 1.12,
+    rankDelta: 1,
+  },
+  {
     id: 'MR',
     short: 'MR',
     name: '水平镜像',
@@ -118,6 +202,7 @@ export const MODS: ModDef[] = [
     category: 'special',
     scoreMultiplier: 1,
     rankDelta: 0,
+    exclusive: 'flip',
   },
   {
     id: 'VM',
@@ -127,6 +212,58 @@ export const MODS: ModDef[] = [
     category: 'special',
     scoreMultiplier: 1,
     rankDelta: 0,
+    exclusive: 'flip',
+  },
+  {
+    id: 'RR',
+    short: 'RR',
+    name: '旋转 180°',
+    description: '谱面整体旋转 180 度（水平+垂直镜像合体）',
+    category: 'special',
+    scoreMultiplier: 1,
+    rankDelta: 0,
+    exclusive: 'flip',
+  },
+  {
+    id: 'BL',
+    short: 'BL',
+    name: '关背景',
+    description: '隐藏曲绘背景，纯黑演出',
+    category: 'special',
+    scoreMultiplier: 1,
+    rankDelta: 0,
+  },
+  {
+    id: 'MW',
+    short: 'MW',
+    name: '律动窗',
+    description: '游玩界面移入小窗，随音乐能量律动漂移（仅桌面端）',
+    category: 'special',
+    scoreMultiplier: 1,
+    rankDelta: 0,
+    exclusive: 'window',
+    desktopOnly: true,
+  },
+  {
+    id: 'WW',
+    short: 'WW',
+    name: '游走窗',
+    description: '游玩界面移入小窗，小窗在屏幕上游走（仅桌面端）',
+    category: 'special',
+    scoreMultiplier: 1,
+    rankDelta: 0,
+    exclusive: 'window',
+    desktopOnly: true,
+  },
+  {
+    id: 'DB',
+    short: 'DB',
+    name: '干扰窗',
+    description: '开局弹出 3 个黑色小窗四处移动，干扰视觉（仅桌面端）',
+    category: 'special',
+    scoreMultiplier: 1,
+    rankDelta: 0,
+    desktopOnly: true,
   },
   {
     id: 'AT',
@@ -234,6 +371,7 @@ export const applyModsToPreferences = (preferences: Preferences, mods: ModId[]):
     if (rate !== undefined) next.timeScale = Number((next.timeScale * rate).toFixed(3));
     if (id === 'MR') next.chartFlipping |= 1;
     if (id === 'VM') next.chartFlipping |= 2;
+    if (id === 'RR') next.chartFlipping |= 3;
   }
   return next;
 };
@@ -253,6 +391,27 @@ export const isNoFail = (mods: ModId[]): boolean =>
 
 /** 是否启用下隐（音符接近判定线时淡出隐藏） */
 export const isHidden = (mods: ModId[]): boolean => mods.includes('HD');
+
+/** 全连（PF）：出现非 PERFECT 判定立即失败 */
+export const isPerfect = (mods: ModId[]): boolean => mods.includes('PF');
+
+/** 暴毙（SD）：任意 MISS 立即失败 */
+export const isSuddenDeath = (mods: ModId[]): boolean => mods.includes('SD');
+
+/** 上隐（SU）：音符出现时间缩短，更考验读谱 */
+export const isSudden = (mods: ModId[]): boolean => mods.includes('SU');
+
+/** 无线（NL）：隐藏判定线，仅剩音符 */
+export const isNoLines = (mods: ModId[]): boolean => mods.includes('NL');
+
+/** 关背景（BL）：隐藏曲绘背景 */
+export const isBlackout = (mods: ModId[]): boolean => mods.includes('BL');
+
+/** 残血（HP）：开局生命值低于满值 */
+export const isLowLife = (mods: ModId[]): boolean => mods.includes('HP');
+
+/** 复活（RS）：生命耗尽时半血复活一次 */
+export const isResurrect = (mods: ModId[]): boolean => mods.includes('RS');
 
 /** 分数倍率（所有已启用模组之积）；0 表示不记录成绩 */
 export const getScoreMultiplier = (mods: ModId[]): number =>

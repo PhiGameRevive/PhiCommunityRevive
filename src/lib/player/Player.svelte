@@ -62,6 +62,9 @@
   let failing = false;
   /** 减速结束，展示仅含重开/退出的失败界面 */
   let showFailed = false;
+  /** 复活（RS 模组）：生命耗尽后半血续命，短暂提示 */
+  let resurrected = false;
+  let resurrectTimer: ReturnType<typeof setTimeout> | undefined;
 
   const setLoopA = () => {
     const scene = gameRef.scene;
@@ -182,11 +185,21 @@
       failing = true;
       showFailed = true;
     });
+
+    // 复活（RS 模组）：半血续命成功，短暂提示后继续游玩
+    EventBus.on('resurrected', () => {
+      resurrected = true;
+      clearTimeout(resurrectTimer);
+      resurrectTimer = setTimeout(() => {
+        resurrected = false;
+      }, 1400);
+    });
   });
 
   onDestroy(async () => {
     // 倒计时进行中退出页面：停止计时器并释放暂停锁，避免残留状态
     clearInterval(counter);
+    clearTimeout(resurrectTimer);
     if (gameRef.scene) gameRef.scene.resumeLock = false;
     // 先停掉所有声音，避免 Phaser 销毁不彻底导致音乐残留叠加
     gameRef.game?.sound?.stopAll?.();
@@ -197,6 +210,15 @@
   });
 
   const exit = () => {
+    // 浮窗模式（MW/WW）：页面运行在 window.open 的小窗中，退出直接关窗而非跳转
+    try {
+      if (new URLSearchParams(window.location.search).has('pop')) {
+        window.close();
+        return;
+      }
+    } catch {
+      /* 忽略 */
+    }
     goto('/songs');
   };
 
@@ -262,6 +284,9 @@
 
 <!-- 失败红光：屏幕四周渐现的红色晕影 -->
 <div class="fail-vignette" class:on={failing} aria-hidden="true"></div>
+
+<!-- 复活（RS 模组）提示 -->
+<div class="resurrected-cue" class:visible={resurrected} aria-hidden="true">复活！</div>
 
 <div class="countdown-layer">
   <div class="countdown" class:visible={countdown > 0 && status === GameStatus.PLAYING}>
@@ -583,6 +608,30 @@
 
   .fail-vignette.on {
     opacity: 1;
+  }
+
+  /* 复活（RS 模组）提示：屏幕中央的短暂文字 */
+  .resurrected-cue {
+    position: fixed;
+    left: 50%;
+    top: 42%;
+    z-index: 16;
+    pointer-events: none;
+    transform: translate(-50%, -50%) scale(0.85);
+    opacity: 0;
+    color: #fff;
+    font-size: clamp(2rem, 6vw, 3.4rem);
+    font-weight: 800;
+    letter-spacing: 0.18em;
+    text-shadow: 0 4px 18px rgba(0, 0, 0, 0.7), 0 0 42px rgba(120, 200, 255, 0.45);
+    transition:
+      opacity 240ms ease,
+      transform 240ms ease;
+  }
+
+  .resurrected-cue.visible {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
   }
 
   /* 练习模式的标题更长（含"练习模式"前缀），缩小避免窄屏溢出 */

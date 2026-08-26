@@ -22,12 +22,43 @@
   import { createReplay } from '$lib/replay';
   import { EventBus } from '$lib/player/EventBus';
   import { loadMods, isRecordable, type ModId } from '$lib/mods';
+  import { startPopupDrift, signalPopupEnd } from '$lib/popupMods';
+  import type { Game as GameScene } from '$lib/player/scenes/Game';
 
   const codename = page.params.codename ?? '';
   const level = (page.params.level ?? 'ez') as Level;
   const isLocal = codename.startsWith(LOCAL_PREFIX);
+  /** 浮窗模式（MW/WW 模组）：页面运行在 window.open 的小窗中，退出应关窗而非跳转 */
+  const isPopup = page.url.searchParams.has('pop');
   /** 本次游玩启用的模组（选歌页写入 localStorage，游玩页与结算共用同一份） */
   const mods: ModId[] = loadMods();
+  /** 律动窗（MW）/ 游走窗（WW）：驱动小窗移动 */
+  const wantMusicDrift = mods.includes('MW');
+  const wantWanderDrift = mods.includes('WW');
+  const wantDrift = wantMusicDrift || wantWanderDrift;
+  let stopDrift: (() => void) | null = null;
+  /** 已就绪的 scene（恢复漂移时重新取分析器用） */
+  let driftScene: GameScene | null = null;
+
+  const stopDriftAndClear = () => {
+    stopDrift?.();
+    stopDrift = null;
+  };
+
+  /** 启动/恢复窗口漂移：暂停、失败、等待播放期间窗口保持不动 */
+  const startDrift = () => {
+    if (!wantDrift || !driftScene) return;
+    stopDriftAndClear();
+    stopDrift = startPopupDrift(wantMusicDrift ? 'music' : 'wander', () =>
+      driftScene!.createPopupAnalyser(),
+    );
+  };
+
+  /** 浮窗模组（MW/WW）：scene 就绪后接入音频分析器并驱动小窗移动 */
+  const onSceneReady = (scene: GameScene) => {
+    driftScene = scene;
+    startDrift();
+  };
   let replayEvents: import('$lib/types').ReplayInputEvent[] = [];
   let replayRecording = false;
 
@@ -59,6 +90,18 @@
       replayEvents.push(event);
     };
     EventBus.on('replay-input', onReplayInput);
+    // 浮窗模组（MW/WW）：scene 就绪后接入音频分析器并驱动小窗移动；
+    // 暂停 / 失败 / 等待播放时窗口不动，恢复播放或重开后继续
+    if (wantDrift) {
+      EventBus.on('current-scene-ready', onSceneReady);
+      EventBus.on('paused', stopDriftAndClear);
+      EventBus.on('failing', stopDriftAndClear);
+      EventBus.on('failed', stopDriftAndClear);
+      EventBus.on('audio-blocked', stopDriftAndClear);
+      EventBus.on('started', startDrift);
+    }
+    // 小窗被关闭（window.close / 关标签页）时也要通知干扰窗结束
+    window.addEventListener('beforeunload', signalPopupEnd);
     try {
       let replay: import('$lib/types').ReplayFile | undefined;
       const replayRaw = sessionStorage.getItem('pendingReplay');
@@ -92,6 +135,13 @@
             loadingDetail = detail;
           },
         });
+        // 直接进入本页（浮窗/刷新/书签）：曲目信息写回 sessionStorage，供结算回放保存使用
+        try {
+          sessionStorage.setItem('currentSong', JSON.stringify(source));
+          sessionStorage.setItem('currentLevel', level);
+        } catch {
+          /* 存储不可用时回放快照缺失，不影响游玩 */
+        }
       }
       config = prepared.config;
       replayEvents = [];
@@ -106,7 +156,17 @@
   loadingTip = randomTip();
 
   onDestroy(() => {
+    // 停止小窗漂移并通知干扰窗结束（浮窗模式下窗口关闭/离开页面都会触发）
+    stopDriftAndClear();
+    signalPopupEnd();
+    window.removeEventListener('beforeunload', signalPopupEnd);
     EventBus.off('finished', handleFinished);
+    EventBus.off('current-scene-ready', onSceneReady);
+    EventBus.off('paused', stopDriftAndClear);
+    EventBus.off('failing', stopDriftAndClear);
+    EventBus.off('failed', stopDriftAndClear);
+    EventBus.off('audio-blocked', stopDriftAndClear);
+    EventBus.off('started', startDrift);
     EventBus.off('replay-input');
     // 延后释放 blob URL：Svelte 父组件的 onDestroy 先于子组件，
     // 立即 revoke 会让仍在销毁中的 Phaser / 音频元素读到已失效的 URL。
@@ -116,6 +176,8 @@
   });
 
   const handleFinished = () => {
+    // 游玩结束：小窗停止漂移（结算画面留在小窗内）
+    stopDriftAndClear();
     const scene = gameRef.scene;
     if (!scene) return;
     const stats = scene.statistics.stats;
@@ -224,6 +286,15 @@
       })
       .catch((e) => console.error('Failed to record result', e));
   };
+
+  /** 返回选歌：浮窗模式下直接关窗（小窗由脚本打开，可 window.close） */
+  const backToSongs = () => {
+    if (isPopup) {
+      window.close();
+    } else {
+      location.href = '/songs';
+    }
+  };
 </script>
 
 <svelte:head>
@@ -234,7 +305,7 @@
   <div class="phi-page">
     <h1 class="phi-title">加载失败</h1>
     <p class="phi-hint">{error}</p>
-    <button onclick={() => (location.href = '/songs')}>返回选歌</button>
+    <button onclick={backToSongs}>返回选歌</button>
   </div>
 {:else if config}
   <div class="player-wrap">

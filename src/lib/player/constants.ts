@@ -85,6 +85,37 @@ export const LIFE_PENALTY_BAD = 0.03;
 export const LIFE_RECOVER_PERFECT = 0.012;
 export const LIFE_RECOVER_GOOD = 0.006;
 
+/* 残血（HP）模组：开局生命值；复活（RS）模组：失败后恢复到的生命值 */
+export const LOW_LIFE_START = 0.3;
+export const RESURRECT_LIFE = 0.5;
+
+/* 上隐（SU）模组：音符出现时间（visibleTime）的保留比例 */
+export const SUDDEN_VISIBLE_RATIO = 0.4;
+
+/*
+    转换器给音符 visibleTime 的默认值是 999999（= 从一开始就可见，无前摇），
+    真实前摇由 PhiEditer 的 alpha 事件换算成秒（通常 1~2s）。
+    上隐时：>= 60s 一律视为哨兵（任何音符提前 60s 出现都等于全程可见），
+    统一压缩成短前摇，否则哨兵值 ×0.4 后仍是几十万秒，观感无变化。
+*/
+export const VISIBLE_TIME_SENTINEL = 60;
+export const SUDDEN_SENTINEL_LEAD_SEC = 0.5;
+
+/*
+    前奏/间奏倒计时：相邻可交互音符间隔超过该秒数才显示倒计时；
+    前奏剩余超过 SKIP_LEAD_SEC 时提供「跳过前奏」，跳过后还剩该秒数。
+*/
+export const MIN_INTRO_SEC = 3;
+export const SKIP_LEAD_SEC = 3;
+
+/*
+    尾奏跳过 / 提前结算：
+    - 最后一个音符判定结束后，音乐剩余超过 OUTRO_MIN_SEC 时显示「跳过尾奏」；
+    - 提前结算设置开启时，最后一个音符判定结束后再等 EARLY_FINISH_DELAY 秒出结算。
+*/
+export const OUTRO_MIN_SEC = 3;
+export const EARLY_FINISH_DELAY = 0.6;
+
 /*
     失败演出：音频在此时长内线性减速至停止（毫秒）。
 */

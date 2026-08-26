@@ -9,6 +9,7 @@
   import { alert as alertModal, prompt as pzPrompt } from '$lib/modal';
   import { loadPreferences, savePreferences } from '$lib/preferences';
   import { preparePlay, setPendingPlay, type PlaySource } from '$lib/playLoader';
+  import { isDesktop, openBlackWindows, openFloatingWindow, signalPopupEnd } from '$lib/popupMods';
   import { takePreloadedSongLists, peekPreloadedSongLists } from '$lib/preload';
   import { swPrecacheUrls } from '$lib/swPreload';
   import {
@@ -82,6 +83,10 @@
   /* ---- 模组（Mods）：难度选择下方的 MOD 按钮打开分区面板 ---- */
   let mods: ModId[] = [];
   let showMods = false;
+  /** 客户端桌面端检测结果（SSR 时恒为 false，挂载后更新） */
+  let desktopOnlyAvailable = false;
+  /** 律动窗/游走窗（MW/WW）承载游玩界面的小窗；浮窗模式下主窗口不跳转 */
+  let floatingWindow: Window | null = null;
 
   const onToggleMod = (id: ModId) => {
     mods = saveMods(toggleMod(mods, id));
@@ -89,6 +94,19 @@
 
   const clearMods = () => {
     mods = saveMods([]);
+  };
+
+  /** 关闭浮窗小窗并释放引用（弹窗类模组用） */
+  const closeFloatingWindow = () => {
+    const win = floatingWindow;
+    floatingWindow = null;
+    if (win) {
+      try {
+        win.close();
+      } catch {
+        /* 忽略 */
+      }
+    }
   };
 
   const importReplay = async (event: Event) => {
@@ -462,6 +480,9 @@
     readyCountdown = 0;
     stopLoadingAnimation();
     void setPreviewMuffled(false);
+    // 用户取消进入游玩：关闭已弹出的干扰窗（浮窗模式下主窗口停留选歌页，不会走到这里）
+    closeFloatingWindow();
+    signalPopupEnd();
   };
 
   /** LOADING 动画的最短展示时长，避免资源命中缓存时一闪而过。 */
@@ -530,6 +551,8 @@
   };
 
   onMount(async () => {
+    // 桌面端检测：SSR/hydration 时 matchMedia 不可用或为初始值，须在客户端挂载后取值
+    desktopOnlyAvailable = isDesktop();
     playerName = localStorage.getItem('playerName') ?? 'GUEST';
     pzLoggedIn = !!getToken();
     // 模组选择跨会话保留（跳转/重启后仍生效）
@@ -689,7 +712,7 @@
     window.removeEventListener('pointercancel', onPointerUp);
   });
 
-  /** 按需加载 PhiZone 谱面列表：进入选歌页默认不拉取（最慢），切到该来源时才请求 */
+  /** 手动加载 PhiZone 谱面列表：进入选歌页/切换来源都不自动拉取（最慢），点按钮才请求 */
   const loadPz = async () => {
     if (pzLoaded || pzLoading) return;
     const run = ++pzRun;
@@ -733,7 +756,7 @@
     if (starting) return;
     activeSource = s;
     current = 0;
-    if (s === 'pz' && !pzLoaded) void loadPz();
+    // PhiZone 列表不自动加载：停在空状态，由玩家点击「加载」按钮触发
     const first = currentList()[0];
     if (first) {
       const lp = LEVELS.find((l) => first.levels[l]);
@@ -818,6 +841,22 @@
   const loadAndPlay = async (item: SongItem) => {
     await setPreviewMuffled(true);
     loadingPreferences = loadPreferences();
+    // 浮窗模式（MW/WW）：主窗口不预下载也不跳转，直接把小窗导航到游玩页。
+    // 小窗内会自行 preparePlay（复用游玩页的 fallback 分支），HTTP 缓存让二次加载很快。
+    if (floatingWindow) {
+      rememberSong(item);
+      stopPreview();
+      // 主窗口停留在选歌页，恢复预览音量（静音是上面准备游玩时开的）
+      void setPreviewMuffled(false);
+      try {
+        floatingWindow.location.href = `/play/${encodeURIComponent(item.codename)}/${level}?pop=1`;
+      } catch {
+        closeFloatingWindow();
+        await alertModal('游玩窗口导航失败，请重试');
+        return;
+      }
+      return;
+    }
     startLoadingAnimation();
     const run = ++loadingRun;
     const controller = new AbortController();
@@ -861,6 +900,9 @@
       clearReadyCountdown();
       stopLoadingAnimation();
       void setPreviewMuffled(false);
+      // 未能进入游玩：关掉浮窗并通知干扰窗关闭
+      closeFloatingWindow();
+      signalPopupEnd();
       await alertModal(e instanceof Error ? e.message : '谱面加载失败');
     }
   };
@@ -868,6 +910,34 @@
   const startPlay = async () => {
     const s = song();
     if (!s || starting) return;
+    // 桌面弹窗类模组：必须在用户手势同步栈内开窗（进入 async 后再开会被弹窗拦截）
+    const needFloating = mods.includes('MW') || mods.includes('WW');
+    const needBlack = mods.includes('DB');
+    if ((needFloating || needBlack) && !isDesktop()) {
+      await alertModal('弹窗类模组仅支持桌面端浏览器（Chrome / Edge）');
+      return;
+    }
+    if (needFloating) {
+      floatingWindow = openFloatingWindow();
+      if (!floatingWindow) {
+        await alertModal('游玩窗口被浏览器拦截：请点击地址栏的弹窗图标，允许本站弹出窗口后重试');
+        return;
+      }
+    }
+    if (needBlack) {
+      // 清除上一批干扰窗的结束信号，避免新一批一打开就自关
+      try {
+        localStorage.removeItem('phiPopupEnd');
+      } catch {
+        /* 忽略 */
+      }
+      const opened = openBlackWindows(3);
+      if (opened === 0) {
+        closeFloatingWindow();
+        await alertModal('干扰窗口被浏览器拦截：请点击地址栏的弹窗图标，允许本站弹出窗口后重试');
+        return;
+      }
+    }
     // PhiZone 源：需要登录后动态获取谱面文件
     if (s.source === 'pz') {
       let token = getToken();
@@ -1196,11 +1266,19 @@
           {#if activeSource === 'pz' && pzLoading}
             <p class="empty-hint">PhiZone 谱面加载中…</p>
           {:else if activeSource === 'pz' && pzSourceError}
-            <p class="empty-hint">PhiZone 列表加载失败：{pzSourceError}</p>
+            <div class="pz-load-wrap">
+              <p class="empty-hint">PhiZone 列表加载失败：{pzSourceError}</p>
+              <button class="pz-load-btn" onclick={() => void loadPz()}>重试加载</button>
+            </div>
+          {:else if activeSource === 'pz' && !pzLoaded}
+            <div class="pz-load-wrap">
+              <p class="empty-hint">PhiZone 谱面列表未加载（加载较慢）</p>
+              <button class="pz-load-btn" onclick={() => void loadPz()}>加载 PhiZone 谱面</button>
+            </div>
           {:else if query.trim()}
             <p class="empty-hint">没有匹配「{query.trim()}」的谱面</p>
           {:else}
-            <p class="empty-hint">该来源暂无谱面</p>
+            <p class="empty-hint">该来源暂无谱面, 尝试切换谱面板块重试</p>
           {/if}
         {/each}
       </div>
@@ -1409,7 +1487,7 @@
     {/if}
   </div>
 
-  <!-- 模组选择面板：一列一个分区（降低难度 / 提升难度 / 特殊） -->
+  <!-- 模组选择面板：分区横向排列（降低难度 / 提升难度 / 特殊 / 自动） -->
   {#if showMods}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="mods-overlay" onclick={() => (showMods = false)}>
@@ -1440,8 +1518,11 @@
                     <button
                       class="mod-card {category}"
                       class:on={mods.includes(def.id)}
+                      class:desktop-off={def.desktopOnly && !desktopOnlyAvailable}
                       onclick={() => onToggleMod(def.id)}
                       aria-pressed={mods.includes(def.id)}
+                      disabled={def.desktopOnly && !desktopOnlyAvailable}
+                      title={def.desktopOnly && !desktopOnlyAvailable ? '仅桌面端（Chrome / Edge）可用' : def.description}
                     >
                       <span class="mod-card-short">{def.short}</span>
                       <span class="mod-card-text">
@@ -2332,6 +2413,45 @@
     font-size: 0.9rem;
   }
 
+  /* PhiZone 手动加载入口 */
+  .pz-load-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 36px 12px;
+  }
+
+  .pz-load-wrap .empty-hint {
+    padding: 0 0 14px;
+  }
+
+  .pz-load-btn {
+    padding: 10px 22px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    font-size: 0.92rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition:
+      background 0.15s ease,
+      border-color 0.15s ease,
+      transform 0.15s ease;
+  }
+
+  .pz-load-btn:hover {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.6);
+    transform: translateY(-1px);
+  }
+
+  .pz-load-btn:active {
+    transform: translateY(0);
+  }
+
   /* 右侧详情 */
   .detail {
     flex: 1;
@@ -3055,7 +3175,7 @@
   }
 
   .mods-panel {
-    width: min(560px, 100%);
+    width: min(1120px, 100%);
     max-height: 100%;
     display: flex;
     flex-direction: column;
@@ -3126,18 +3246,21 @@
     color: #ffb4b4;
   }
 
-  /* 分区纵向排列，超出时面板内部滚动 */
+  /* 分区横向排列（一列一个分区），超出时面板内部滚动 */
   .mods-body {
     min-height: 0;
     flex: 1;
-    overflow-y: auto;
+    overflow: auto;
     display: flex;
-    flex-direction: column;
-    gap: 16px;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 18px;
     padding-right: 2px;
   }
 
   .mods-group {
+    flex: 1 1 240px;
+    min-width: 240px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -3199,6 +3322,19 @@
     background: rgba(255, 255, 255, 0.1);
     border-color: rgba(255, 255, 255, 0.45);
     color: #fff;
+  }
+
+  /* 仅桌面端模组：移动端置灰不可选 */
+  .mod-card:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    filter: saturate(0.3);
+  }
+
+  .mod-card:disabled:hover {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.14);
+    color: #e8e8e8;
   }
 
   .mod-card.on {

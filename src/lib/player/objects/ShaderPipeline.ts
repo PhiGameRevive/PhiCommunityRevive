@@ -201,12 +201,16 @@ export class ShaderFilter extends Filters.Controller {
       .replaceAll('screenTexture', 'uMainSampler');
     fragShader = transformForLoops(fragShader);
 
-    // Register the render node for this shader
+    // Register the render node for this shader.
+    // 重开（restart）会再次执行 initializeShaders，同名渲染节点可能已存在：
+    // 同一谱面的 shader 名与片元源码相同，直接复用，避免 "already exists" 报错。
     const renderer = scene.renderer as Phaser.Renderer.WebGL.WebGLRenderer;
-    renderer.renderNodes.addNode(
-      renderNodeName,
-      new ShaderFilterNode(renderNodeName, renderer.renderNodes, fragShader),
-    );
+    if (!renderer.renderNodes.hasNode(renderNodeName)) {
+      renderer.renderNodes.addNode(
+        renderNodeName,
+        new ShaderFilterNode(renderNodeName, renderer.renderNodes, fragShader),
+      );
+    }
 
     super(camera, renderNodeName);
 

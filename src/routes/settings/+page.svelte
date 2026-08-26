@@ -120,6 +120,15 @@
       <span class="label">观看教学</span>
       <button class="flat-btn" onclick={() => goto('/play/ptc-r-intro/hd')}>进入</button>
     </div>
+    <div class="row">
+      <span class="label">提前结算</span>
+      <button
+        class="toggle"
+        class:on={prefs.earlyFinish}
+        onclick={() => update('earlyFinish', !prefs.earlyFinish)}
+        aria-label="提前结算"
+      ></button>
+    </div>
   </section>
 
   <!-- 界面 -->

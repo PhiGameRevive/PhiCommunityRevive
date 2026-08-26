@@ -363,6 +363,11 @@ export class Line {
     this.updateAttachedVideos(params);
   }
 
+  /** 仅隐藏/显示判定线本身（音符与 note 容器不受影响）。用于「无线 NL」模组。 */
+  setLineVisible(visible: boolean) {
+    this._line.setVisible(visible);
+  }
+
   updateUIAttachments(params: {
     x: number;
     y: number;

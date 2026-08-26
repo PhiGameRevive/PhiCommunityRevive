@@ -17,6 +17,20 @@ export interface Config {
   noFail?: boolean;
   /** 下隐（HD 模组）：音符接近判定线时淡出隐藏 */
   hidden?: boolean;
+  /** 全连（PF 模组）：出现非 PERFECT 判定立即失败 */
+  perfectFail?: boolean;
+  /** 暴毙（SD 模组）：任意 MISS 立即失败 */
+  suddenDeath?: boolean;
+  /** 上隐（SU 模组）：音符出现时间缩短（更考验读谱） */
+  sudden?: boolean;
+  /** 无线（NL 模组）：隐藏判定线，仅剩音符 */
+  noLines?: boolean;
+  /** 关背景（BL 模组）：隐藏曲绘背景 */
+  blackout?: boolean;
+  /** 残血（HP 模组）：开局生命值低于满值 */
+  lowLife?: boolean;
+  /** 复活（RS 模组）：生命耗尽时半血复活一次 */
+  resurrect?: boolean;
   adjustOffset: boolean;
   render: boolean;
   autostart: boolean;
@@ -118,6 +132,8 @@ export interface Preferences {
   useVideoBackground: boolean;
   videoBackgroundAlpha: number;
   persistentSeekBar: boolean;
+  /** 提前结算：最后一个音符判定结束后直接出结算，不等音乐播完 */
+  earlyFinish: boolean;
 }
 
 export interface MediaOptions {

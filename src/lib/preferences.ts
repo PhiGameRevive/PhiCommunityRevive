@@ -23,6 +23,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   useVideoBackground: true,
   videoBackgroundAlpha: 0.5,
   persistentSeekBar: false,
+  earlyFinish: false,
 };
 
 export function loadPreferences(): Preferences {

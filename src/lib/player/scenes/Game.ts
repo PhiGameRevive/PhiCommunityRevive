@@ -33,6 +33,7 @@ import { Line } from '../objects/Line';
 import type { LongNote } from '../objects/LongNote';
 import type { PlainNote } from '../objects/PlainNote';
 import { GameUI } from '../objects/GameUI';
+import { IntroCountdown, type CountdownWindow } from '../objects/IntroCountdown';
 import { ResultsUI } from '../objects/ResultsUI';
 import { PointerHandler } from '../handlers/PointerHandler';
 import { KeyboardHandler } from '../handlers/KeyboardHandler';
@@ -49,12 +50,19 @@ import { HtmlAudioSong, type SongLike } from '../services/htmlAudioSong';
 import { ResourcePackHandler } from '../handlers/ResourcePackHandler';
 import { m } from '$lib/messages';
 import {
+  EARLY_FINISH_DELAY,
   FAIL_SLOWDOWN_MS,
   HOLD_TAIL_TOLERANCE,
   LIFE_PENALTY_BAD,
   LIFE_PENALTY_MISS,
   LIFE_RECOVER_GOOD,
   LIFE_RECOVER_PERFECT,
+  LOW_LIFE_START,
+  MIN_INTRO_SEC,
+  RESURRECT_LIFE,
+  SUDDEN_SENTINEL_LEAD_SEC,
+  SUDDEN_VISIBLE_RATIO,
+  VISIBLE_TIME_SENTINEL,
   clampPlaybackRate,
 } from '../constants';
 
@@ -136,6 +144,27 @@ export class Game extends Scene {
   private _noFail = false;
   /** 下隐（HD 模组）：音符接近判定线时淡出隐藏 */
   private _hidden = false;
+  /** 全连（PF 模组）：出现非 PERFECT 判定立即失败 */
+  private _perfectFail = false;
+  /** 暴毙（SD 模组）：任意 MISS 立即失败 */
+  private _suddenDeath = false;
+  /** 上隐（SU 模组）：音符出现时间缩短 */
+  private _sudden = false;
+  /** 无线（NL 模组）：隐藏判定线，仅剩音符 */
+  private _noLines = false;
+  /** 关背景（BL 模组）：隐藏曲绘背景 */
+  private _blackout = false;
+  /** 残血（HP 模组）：开局生命值低于满值 */
+  private _lowLife = false;
+  /** 复活（RS 模组）：生命耗尽时半血复活一次 */
+  private _resurrect = false;
+  private _resurrectUsed = false;
+  /** 提前结算设置：最后一个音符判定结束后直接出结算，不等音乐播完 */
+  private _earlyFinish = false;
+  /** 最后一个可交互音符的判定结束时刻（秒，谱面时间）= 尾奏起点 */
+  private _outroStart = Infinity;
+  /** 提前结算触发时刻 = _outroStart + EARLY_FINISH_DELAY */
+  private _earlyFinishTime = Infinity;
   private _replayIndex = 0;
   private _fastForwardToken = 0;
   private _fastForwardTarget: number | null = null;
@@ -193,9 +222,13 @@ export class Game extends Scene {
   private _objects: Node[] = [];
 
   private _song: SongLike;
+  /** 律动窗（MW）接入的音频分析器；undefined 表示尚未创建 */
+  private _popupAnalyser: AnalyserNode | null | undefined;
   private _background: GameObjects.Image;
   private _gameUI: GameUI;
   private _resultsUI?: ResultsUI;
+  /** 开场前奏倒计时（首个可交互 note 之前的「数字 + 收缩进度条」） */
+  private _introCountdown?: IntroCountdown;
 
   private _clock: Clock;
   private _pointerHandler?: PointerHandler;
@@ -250,6 +283,15 @@ export class Game extends Scene {
     // AT / PR 已在 mods 层隐含开启 noFail，这里再兜一层，避免外链参数遗漏
     this._noFail = this._data.noFail === true || this._data.autoplay || this._data.practice;
     this._hidden = this._data.hidden === true;
+    this._perfectFail = this._data.perfectFail === true;
+    this._suddenDeath = this._data.suddenDeath === true;
+    this._sudden = this._data.sudden === true;
+    this._noLines = this._data.noLines === true;
+    this._blackout = this._data.blackout === true;
+    this._lowLife = this._data.lowLife === true;
+    this._resurrect = this._data.resurrect === true;
+    this._resurrectUsed = false;
+    this._earlyFinish = this._data.preferences.earlyFinish === true;
     this._autostart = this._data.autostart;
     this._adjustOffset = this._data.adjustOffset;
     this._render = false;
@@ -473,6 +515,8 @@ export class Game extends Scene {
           this._status = GameStatus.READY;
         }
         this._lines.forEach((line) => line.setVisible(true));
+        // 无线（NL）：判定线本身隐藏，音符保留
+        if (this._noLines) this._lines.forEach((line) => line.setLineVisible(false));
         if (this._adjustOffset) {
           EventBus.on('offset-adjusted', (offset: number) => {
             this._chart.META.offset = offset;
@@ -521,12 +565,21 @@ export class Game extends Scene {
       if (!shader) return;
       const filterTarget = 'object' in shader.target ? shader.target.object : shader.target;
       filterTarget.filters?.external.clear();
+      // 局部 shader 的 Layer 与节点条目必须随重置销毁并从对象树移除，
+      // 否则 restart 重新 initializeShaders 时残留对象会被后续收集逻辑引用。
+      if ('object' in shader.target) {
+        shader.target.object.destroy();
+        this._objects = this._objects.filter((o) => o !== shader.target);
+      }
     });
+    this._shaders = undefined;
     this._videos?.forEach((video) => video.destroy());
   }
 
   async start(): Promise<boolean> {
     if (this._status === GameStatus.ERROR) return false;
+    this._life = this._lowLife ? LOW_LIFE_START : 1;
+    this._resurrectUsed = false;
     this.in();
     try {
       // 浏览器可能要求用户手势才能恢复 WebAudio；原生 HTMLAudio 的 play()
@@ -614,7 +667,8 @@ export class Game extends Scene {
     this._judgmentHandler.reset();
     this._clock.setSeek(0);
     // 失败演出会把播放速率降到 0，重开前必须复位，否则新一轮开局即静止
-    this._life = 1;
+    this._life = this._lowLife ? LOW_LIFE_START : 1;
+    this._resurrectUsed = false;
     this._failStart = undefined;
     this._resultsUI?.destroy();
     this._resultsUI = undefined;
@@ -648,6 +702,16 @@ export class Game extends Scene {
   applyJudgmentToLife(type: JudgmentType) {
     if (this._noFail || this._render) return;
     if (this._status !== GameStatus.PLAYING) return;
+    // 全连（PF）：出现非 PERFECT 判定立即失败；暴毙（SD）：任意 MISS 立即失败。
+    // 两者直接走失败流程、不参与生命结算，因此也不受复活（RS）影响。
+    if (this._perfectFail && type !== JudgmentType.PERFECT) {
+      this.fail();
+      return;
+    }
+    if (this._suddenDeath && type === JudgmentType.MISS) {
+      this.fail();
+      return;
+    }
     switch (type) {
       case JudgmentType.MISS:
         this._life -= LIFE_PENALTY_MISS;
@@ -667,15 +731,25 @@ export class Game extends Scene {
     }
     this._life = Math.min(Math.max(this._life, 0), 1);
     EventBus.emit('life', this._life);
-    if (this._life <= 0) this.fail();
+    // 只有生命耗尽这条路径允许复活（RS 模组）
+    if (this._life <= 0) this.fail(true);
   }
 
   /**
    * 触发失败：进入 FAILED 状态，由 update 逐帧把播放速率降到 0；
    * 减速结束后再发 'failed'，让 UI 展示红光与仅含重开/退出的暂停界面。
+   * @param revivable 是否为生命耗尽触发（可被复活 RS 模组拦截）
    */
-  fail() {
+  fail(revivable: boolean = false) {
     if (this._status !== GameStatus.PLAYING) return;
+    // 复活（RS）：生命耗尽时的第一次失败半血续命，仅一次
+    if (revivable && this._resurrect && !this._resurrectUsed) {
+      this._resurrectUsed = true;
+      this._life = RESURRECT_LIFE;
+      EventBus.emit('life', this._life);
+      EventBus.emit('resurrected');
+      return;
+    }
     clearTimeout(this._timeout);
     this._status = GameStatus.FAILED;
     this._failStart = performance.now();
@@ -999,6 +1073,7 @@ export class Game extends Scene {
     this._pointerHandler?.update(delta);
     if (this._visible) {
       this._gameUI.update();
+      this._introCountdown?.update();
       this.positionBackground(this._background);
     }
     const realTimeSec = this.realTimeSec;
@@ -1013,6 +1088,16 @@ export class Game extends Scene {
     if (this._isSeeking) {
       this._status = status;
       this._isSeeking = false;
+    }
+    // 提前结算：最后一个音符判定结束后直接出结算，不等音乐播完（练习模式仍由 end() 走暂停）
+    if (
+      !this.fastForwarding &&
+      this._earlyFinish &&
+      !this._practice &&
+      this._status === GameStatus.PLAYING &&
+      this.timeSec >= this._earlyFinishTime
+    ) {
+      this.end();
     }
   }
 
@@ -1039,6 +1124,7 @@ export class Game extends Scene {
     }
     this._lines.forEach((line) => line.destroy());
     this._gameUI.destroy();
+    this._introCountdown?.destroy();
     if (this._resultsUI) this._resultsUI.destroy();
   }
 
@@ -1101,6 +1187,8 @@ export class Game extends Scene {
     ).setDepth(0);
     this.registerNode(this._background, 'illustration');
     this.positionBackground(this._background);
+    // 关背景（BL）：隐藏曲绘背景，纯黑演出（positionBackground 只改位置/尺寸，不会重新显示）
+    if (this._blackout) this._background.setVisible(false);
   }
 
   positionBackground(
@@ -1124,6 +1212,20 @@ export class Game extends Scene {
   initializeChart() {
     EventBus.emit('loading-detail', m.initializing_chart());
     const chart = this._chart;
+    // 上隐（SU）：音符出现时间缩短。必须在 Line 构造（内部按 visibleTime 排序）
+    // 之前改写原始谱面数据，音符才会按新出现时间生成。
+    if (this._sudden) {
+      chart.judgeLineList.forEach((line) =>
+        line.notes?.forEach((note) => {
+          const vt = note.visibleTime ?? 0;
+          // 哨兵值（默认 999999，从一开始就可见）压缩成短前摇，否则缩放后观感无变化
+          note.visibleTime =
+            vt >= VISIBLE_TIME_SENTINEL
+              ? SUDDEN_SENTINEL_LEAD_SEC
+              : Math.max(0.05, vt * SUDDEN_VISIBLE_RATIO);
+        }),
+      );
+    }
     this._offset =
       chart.META.offset + (this._adjustOffset ? 0 : this._data.preferences.chartOffset);
     this._bpmList = chart.BPMList;
@@ -1199,6 +1301,12 @@ export class Game extends Scene {
       (a, b) => this.getNoteJudgmentStartTime(a) - this.getNoteJudgmentStartTime(b),
     );
     this._numberOfNotes = this._notes.length;
+    // 尾奏起点 = 最后一个可交互音符的判定结束时刻（含宽限）
+    this._outroStart =
+      this._notes.length > 0
+        ? Math.max(...this._notes.map((note) => this.getNoteJudgmentEndTime(note)))
+        : Infinity;
+    this._earlyFinishTime = this._outroStart + EARLY_FINISH_DELAY;
     this._lines
       .filter((line) => line.data.father != -1)
       .forEach((line) => {
@@ -1275,6 +1383,63 @@ export class Game extends Scene {
   setupUI() {
     EventBus.emit('loading-detail', m.setting_up_ui());
     this._gameUI = new GameUI(this);
+    // 前奏/间奏倒计时 + 尾奏跳过：由可交互（非装饰）音符之间的空白段驱动
+    this._introCountdown = new IntroCountdown(this);
+    this._introCountdown.setWindows(this.buildCountdownWindows());
+    this._introCountdown.setOutroStart(this._outroStart);
+  }
+
+  /**
+   * 计算倒计时空白窗口：相邻可交互音符间隔超过 MIN_INTRO_SEC 的空白段。
+   * 第一个窗口即前奏（start = 0）；Hold 以尾判定时刻为「结束点」，
+   * 避免长条尾还没放完就开始倒计时。
+   */
+  private buildCountdownWindows(): CountdownWindow[] {
+    const events = this._notes.map((note) => ({
+      time: note.hitTime,
+      end: note.note.type === 2 ? (note as LongNote).endHitTime : note.hitTime,
+    }));
+    events.sort((a, b) => a.time - b.time);
+    const windows: CountdownWindow[] = [];
+    let prevEnd = 0;
+    for (const e of events) {
+      if (e.time - prevEnd > MIN_INTRO_SEC) windows.push({ start: prevEnd, end: e.time });
+      prevEnd = Math.max(prevEnd, e.end);
+    }
+    return windows;
+  }
+
+  /** 当前是否可跳过前奏（前奏剩余 > SKIP_LEAD_SEC） */
+  public get skipIntroAvailable(): boolean {
+    return this._introCountdown?.skipAvailable ?? false;
+  }
+
+  /**
+   * 跳过前奏：直接跳到前奏还剩 3 秒处（前向跳转）。
+   * 前奏是纯空白段，没有可交互音符，因此无需保留任何判定状态。
+   */
+  public skipIntro() {
+    const countdown = this._introCountdown;
+    if (!countdown || !countdown.skipAvailable) return;
+    // 目标为谱面时间，时钟走的是 realTime（含 offset）
+    const realTarget = Math.max(0, countdown.skipTarget + this._offset / 1000);
+    this.setSeek(realTarget);
+  }
+
+  /** 当前是否可跳过尾奏（最后一个音符判定结束且音乐剩余较长） */
+  public get skipOutroAvailable(): boolean {
+    return this._introCountdown?.outroAvailable ?? false;
+  }
+
+  /** 跳过尾奏：立即出结算（练习模式仍走「播完暂停」路径） */
+  public skipOutro() {
+    if (!this._introCountdown?.outroAvailable) return;
+    this.end();
+  }
+
+  /** 提前结算设置（供尾奏跳过按钮判断是否需要显示） */
+  public get earlyFinish() {
+    return this._earlyFinish;
   }
 
   createHitEffectsAnimation() {
@@ -1569,6 +1734,50 @@ export class Game extends Scene {
 
   public get song() {
     return this._song;
+  }
+
+  /**
+   * 律动窗（MW）专用：返回已接入音频链路的 AnalyserNode，可读取实时频谱。
+   *  - 普通音乐：把 WebAudioSoundManager 的主音量链插入 analyser，覆盖整个混音；
+   *  - 视频音乐：用 MediaElementSource 接管 HtmlAudioSong 的原生 audio 元素输出。
+   * 不可用（HTML5AudioSoundManager / 元素已被接管 / 已被调用过）时返回 null。
+   */
+  public createPopupAnalyser(): AnalyserNode | null {
+    if (this._popupAnalyser !== undefined) return this._popupAnalyser;
+    try {
+      const manager = this.sound as unknown as {
+        context?: AudioContext;
+        masterVolumeNode?: GainNode;
+      };
+      const ctx = manager.context;
+      if (!ctx) return (this._popupAnalyser = null);
+      if (this._song instanceof HtmlAudioSong) {
+        const el = this._song.audioElement;
+        if (!el) return (this._popupAnalyser = null);
+        const source = ctx.createMediaElementSource(el);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.7;
+        source.connect(analyser);
+        analyser.connect(ctx.destination);
+        return (this._popupAnalyser = analyser);
+      }
+      const master = manager.masterVolumeNode;
+      if (master) {
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.7;
+        // masterVolumeNode 原本直连 context.destination；插入 analyser 采集频谱后继续输出
+        master.disconnect();
+        master.connect(analyser);
+        analyser.connect(ctx.destination);
+        return (this._popupAnalyser = analyser);
+      }
+      return (this._popupAnalyser = null);
+    } catch (e) {
+      console.warn('无法接入音频分析器（律动窗）', e);
+      return (this._popupAnalyser = null);
+    }
   }
 
   public get songUrl() {

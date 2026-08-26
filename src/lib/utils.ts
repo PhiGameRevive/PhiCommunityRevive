@@ -290,6 +290,7 @@ export const getParams = (url?: string, loadFromStorage = true): Config | null =
       useVideoBackground: true,
       videoBackgroundAlpha: 0.5,
       persistentSeekBar: false,
+      earlyFinish: false,
     },
     mediaOptions: {
       frameRate,
