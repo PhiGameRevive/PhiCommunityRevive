@@ -65,6 +65,10 @@
   let loaded = false;
   let pzLoggedIn = false;
   let pzSourceError = '';
+  /** PhiZone 列表按需加载：进入页面默认不拉取（最慢），切到该来源时才请求 */
+  let pzLoading = false;
+  let pzLoaded = false;
+  let pzRun = 0;
 
   let level: Level = 'ez';
   let current = 0;
@@ -554,8 +558,9 @@
       pageProgress = Math.min((performance.now() - pageLoadingStart) / MIN_PAGE_LOADING_MS, 0.9);
     }, 60);
     try {
-      // 开场动画期间已预载三个谱面源列表，命中则直接使用（跳过重复的网络请求）
+      // 开场动画期间已预载谱面源列表（不含 pz），命中则直接使用（跳过重复的网络请求）
       const pre = takePreloadedSongLists();
+      // 默认只拉取 phi / ptc：PhiZone 列表最慢，改为点开对应 Tab 时按需加载（见 loadPz）
       const [phi, ptc, pz, locals] = pre
         ? [pre.phi, pre.ptc, pre.pz, await getAllLocalCharts()]
         : await Promise.all([
@@ -567,13 +572,10 @@
               console.error('ptc source failed', e);
               return [];
             }),
-            fetchSongs('pz').catch((e) => {
-              console.error('pz source failed', e);
-              pzSourceError = e instanceof Error ? e.message : String(e);
-              return [];
-            }),
+            Promise.resolve([] as SourceSong[]),
             getAllLocalCharts(),
           ]);
+      pzLoaded = !!pre && pre.pz.length > 0;
       songsBySource.phi = phi.map((s) => ({
         codename: `phi-${s.id}`,
         source: 'phi',
@@ -627,9 +629,9 @@
       const all = await getAllResults();
       rks = all.reduce((max, r) => Math.max(max, r.rankingScore), 0);
 
-      // 首次进入选歌页时从三个在线谱面源随机挑一首，避免每次固定落在 PhiCommunity 第一首。
-      // 不包含 local：本地谱面只属于当前设备，不应影响在线曲库的随机性。
-      const onlinePool = [...songsBySource.phi, ...songsBySource.ptc, ...songsBySource.pz];
+      // 首次进入选歌页时从已加载的在线谱面源随机挑一首，避免每次固定落在 PhiCommunity 第一首。
+      // 不包含 local；pz 默认未加载时也不参与随机（只有预载命中或手动打开过 PhiZone 才计入）。
+      const onlinePool = [...songsBySource.phi, ...songsBySource.ptc, ...(pzLoaded ? songsBySource.pz : [])];
       const randomSong = onlinePool[Math.floor(Math.random() * onlinePool.length)];
       if (randomSong) {
         // 在线池只由 phi/ptc/pz 组成，随机结果不可能落到 local
@@ -674,6 +676,7 @@
   });
 
   onDestroy(() => {
+    pzRun++; // 使进行中的 PhiZone 列表请求失效（组件已销毁）
     cancelAnimationFrame(animId);
     clearInterval(pageProgressTimer);
     clearReadyCountdown();
@@ -686,10 +689,51 @@
     window.removeEventListener('pointercancel', onPointerUp);
   });
 
+  /** 按需加载 PhiZone 谱面列表：进入选歌页默认不拉取（最慢），切到该来源时才请求 */
+  const loadPz = async () => {
+    if (pzLoaded || pzLoading) return;
+    const run = ++pzRun;
+    pzLoading = true;
+    pzSourceError = '';
+    try {
+      const list = await fetchSongs('pz');
+      if (run !== pzRun) return; // 已切走或组件销毁
+      const items: SongItem[] = list.map((s) => ({
+        codename: `pz-${s.id}`,
+        id: s.id,
+        source: 'pz',
+        name: s.name,
+        artist: s.artist,
+        illustrationUrl: s.illustration,
+        songUrl: s.song,
+        levels: s.levels,
+      }));
+      // 必须整体重新赋值：Svelte 5 legacy 模式下成员赋值 songsBySource.pz = ... 不会通知视图更新
+      songsBySource = { ...songsBySource, pz: items };
+      pzLoaded = true;
+      // 用户正停在 PhiZone Tab 时，加载完成后直接选中第一首并试听
+      if (activeSource === 'pz') {
+        current = 0;
+        const first = currentList()[0];
+        if (first) {
+          const lp = LEVELS.find((l) => first.levels[l]);
+          if (lp) level = lp;
+        }
+        playPreview(first ?? null);
+      }
+    } catch (e) {
+      if (run !== pzRun) return;
+      pzSourceError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (run === pzRun) pzLoading = false;
+    }
+  };
+
   const switchSource = (s: ChartSourceId | 'local') => {
     if (starting) return;
     activeSource = s;
     current = 0;
+    if (s === 'pz' && !pzLoaded) void loadPz();
     const first = currentList()[0];
     if (first) {
       const lp = LEVELS.find((l) => first.levels[l]);
@@ -948,6 +992,7 @@
             onclick={() => switchSource(src)}
           >
             {SOURCE_LABELS[src]}
+            {#if src === 'pz' && pzLoading}<span class="tab-loading" aria-label="加载中"></span>{/if}
           </button>
         {/each}
         <button
@@ -1121,6 +1166,11 @@
             <button class="search-clear" onclick={clearSearch} aria-label="清除搜索"></button>
           {/if}
         </div>
+        {#if activeSource === 'pz' && pzLoading}
+          <div class="list-loading-bar" aria-label="PhiZone 谱面加载中">
+            <div class="list-loading-fill"></div>
+          </div>
+        {/if}
         {#each currentList() as item, i}
           <button
             class="song-item"
@@ -1143,7 +1193,9 @@
             </div>
           </button>
         {:else}
-          {#if activeSource === 'pz' && pzSourceError}
+          {#if activeSource === 'pz' && pzLoading}
+            <p class="empty-hint">PhiZone 谱面加载中…</p>
+          {:else if activeSource === 'pz' && pzSourceError}
             <p class="empty-hint">PhiZone 列表加载失败：{pzSourceError}</p>
           {:else if query.trim()}
             <p class="empty-hint">没有匹配「{query.trim()}」的谱面</p>
@@ -1571,6 +1623,55 @@
   .source-tab.active {
     color: #fff;
     border-bottom-color: #fff;
+  }
+
+  /* 来源 Tab 内的小加载圈（PhiZone 按需加载中） */
+  .source-tab .tab-loading {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-left: 6px;
+    vertical-align: -1px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: tab-spin 0.8s linear infinite;
+  }
+
+  @keyframes tab-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* 列表按需加载时的横条进度动画（PhiZone 首次切到该 Tab） */
+  .list-loading-bar {
+    position: relative;
+    height: 3px;
+    margin: 8px 12px 0;
+    border-radius: 2px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.12);
+  }
+
+  .list-loading-bar .list-loading-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 40%;
+    height: 100%;
+    border-radius: 2px;
+    background: linear-gradient(90deg, transparent, rgba(106, 164, 255, 0.9), transparent);
+    animation: list-loading-slide 1.1s ease-in-out infinite;
+  }
+
+  @keyframes list-loading-slide {
+    from {
+      left: -40%;
+    }
+    to {
+      left: 100%;
+    }
   }
 
   .top-actions {

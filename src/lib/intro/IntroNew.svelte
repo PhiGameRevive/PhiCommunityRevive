@@ -257,9 +257,7 @@
   <div class="stage tap" class:on={climax}>
     <img class="title-logo big" src="/ui/Title.svg" alt="PhiCommunity" />
     <div class="tap-to-start">
-      <span class="dot">▮</span>
       TAP TO START
-      <span class="dot">▮</span>
     </div>
   </div>
 
@@ -560,15 +558,6 @@
     display: flex;
     align-items: center;
     gap: 0.5em;
-  }
-
-  .dot {
-    font-size: 0.7em;
-    animation: blink 1.2s steps(1) infinite;
-  }
-
-  .dot:last-child {
-    animation-delay: 0.6s;
   }
 
   @keyframes flash {

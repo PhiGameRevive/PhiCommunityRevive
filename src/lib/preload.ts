@@ -15,12 +15,13 @@ let lists: PreloadedSongLists | null = null;
 let warming = false;
 
 /**
- * 并行拉取三个谱面源。单个源失败不影响其他源（与选歌页现有容错一致）。
+ * 并行拉取谱面源。默认不含 PhiZone：其列表最慢，避免拖慢开场与选歌页加载，
+ * 改为进入选歌页后切到对应来源时按需拉取。单个源失败不影响其他源。
  * 并发调用只执行一次。
  */
 export const preloadSongLists = async (): Promise<PreloadedSongLists> => {
   if (lists) return lists;
-  const [phi, ptc, pz] = await Promise.all([
+  const [phi, ptc] = await Promise.all([
     fetchSongs('phi').catch((e) => {
       console.error('preload phi source failed', e);
       return [] as SourceSong[];
@@ -29,12 +30,8 @@ export const preloadSongLists = async (): Promise<PreloadedSongLists> => {
       console.error('preload ptc source failed', e);
       return [] as SourceSong[];
     }),
-    fetchSongs('pz').catch((e) => {
-      console.error('preload pz source failed', e);
-      return [] as SourceSong[];
-    }),
   ]);
-  lists = { phi, ptc, pz };
+  lists = { phi, ptc, pz: [] };
   return lists;
 };
 
