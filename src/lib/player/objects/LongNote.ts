@@ -9,10 +9,12 @@ import type { Game } from '../scenes/Game';
 import type { Line } from './Line';
 import { getTimeSec, rgbToHex } from '../utils';
 import {
+  HIDDEN_HOLD_ALPHA,
   HOLD_BODY_TOLERANCE,
   HOLD_TAIL_TOLERANCE,
   NOTE_BASE_SIZE,
   NOTE_PRIORITIES,
+  SUDDEN_FADE_IN_SEC,
   hiddenAlphaFactor,
 } from '../constants';
 import { isDebug } from '$lib/utils';
@@ -65,7 +67,8 @@ export class LongNote extends GameObjects.Container {
     this._body.setOrigin(0.5, 1);
     this._tail.setOrigin(0.5, isCompact ? 0.5 : 1);
     this.resize();
-    this.setAlpha(data.alpha / 255);
+    this.setAlpha(1);
+    this.applyAlpha(data.alpha / 255);
     if (data.tint) {
       this.setTint(rgbToHex(data.tint));
     }
@@ -134,13 +137,39 @@ export class LongNote extends GameObjects.Container {
     this._head.setY(this._yModifier * headDist);
     this._body.setY(this._yModifier * (this._line.data.isCover ? Math.max(0, headDist) : headDist));
     this._tail.setY(this._yModifier * tailDist);
-    // 下隐（HD）：按「距头部打击还剩多少秒」整体淡出（与 PlainNote 同一套阈值）。
-    // 两类音符不参与：isFake 装饰性音符；所属判定线不可见（此时音符是唯一的打击参照）。
-    // 头部越线后不再继续压暗，否则长按期间会完全看不见。
-    if (this._scene.hidden && !this._data.isFake && this._line.isVisibleReference) {
-      const factor =
-        beat > this._data.startBeat ? 1 : hiddenAlphaFactor(this._hitTime - songTime);
-      this.setAlpha((this._data.alpha / 255) * factor);
+    // 上隐（SU）/ 下隐（HD）共用透明度控制：先应用 SU 渐显，再应用 HD 渐隐。
+    // 两类音符不参与 HD 渐隐：isFake 装饰性音符；所属判定线不可见（此时音符是唯一的打击参照）。
+    if (
+      this._scene.sudden ||
+      (this._scene.hidden && !this._data.isFake && this._line.isVisibleReference)
+    ) {
+      const base = this._data.alpha / 255;
+      // 上隐（SU）：音符整体出现时渐显，避免「凭空蹦出」。
+      let appear = 1;
+      if (this._scene.sudden) {
+        const appearSec = songTime - (this._hitTime - this._data.visibleTime);
+        if (appearSec >= 0 && appearSec < SUDDEN_FADE_IN_SEC) {
+          appear = appearSec / SUDDEN_FADE_IN_SEC;
+        }
+      }
+      // 下隐（HD）：接近判定线时淡出。
+      // 头部判定前：整体按头部打击时间渐隐（与 PlainNote 同一套阈值）；
+      // 头部判定后（长按中）：head 保持可见，body 保留淡淡影子供跟手，
+      // tail 按自身判定时间（endTime）渐隐，避免长条尾部在命中前突然消失。
+      if (this._scene.hidden && !this._data.isFake && this._line.isVisibleReference) {
+        if (beat > this._data.startBeat) {
+          this._head.setAlpha(base * appear);
+          this._body.setAlpha(base * appear * HIDDEN_HOLD_ALPHA);
+          this._tail.setAlpha(
+            beat > this._data.endBeat ? 0 : base * appear * hiddenAlphaFactor(this._endTime - songTime),
+          );
+        } else {
+          const factor = hiddenAlphaFactor(this._hitTime - songTime);
+          this.applyAlpha(base * appear * factor);
+        }
+      } else {
+        this.applyAlpha(base * appear);
+      }
     }
     const bodyHeight =
       -this._yModifier *
@@ -233,6 +262,13 @@ export class LongNote extends GameObjects.Container {
     this._tail.clearTint();
   }
 
+  /** 对头、主体、尾分别设置透明度（Container 的 alpha 只作用在容器自身） */
+  applyAlpha(alpha: number) {
+    this._head.setAlpha(alpha);
+    this._body.setAlpha(alpha);
+    this._tail.setAlpha(alpha);
+  }
+
   setHeadHeight(height: number) {
     this._targetHeadHeight = height;
   }
@@ -271,7 +307,7 @@ export class LongNote extends GameObjects.Container {
   }
 
   resetAppearance() {
-    this.setAlpha(this._data.alpha / 255);
+    this.applyAlpha(this._data.alpha / 255);
     this.clearTint();
     if (this._data.tint) {
       this.setTint(rgbToHex(this._data.tint));

@@ -100,13 +100,25 @@
   const closeFloatingWindow = () => {
     const win = floatingWindow;
     floatingWindow = null;
-    if (win) {
+    if (win && !win.closed) {
       try {
         win.close();
       } catch {
         /* 忽略 */
       }
     }
+  };
+
+  /** 浮窗小窗引用（不可用（已关闭）时返回 null；弹窗类模组用） */
+  const hasFloatingWindow = (): Window | null => {
+    if (!floatingWindow) return null;
+    // 玩家已在小窗内退出游玩并关窗：清掉这个「已死亡」的引用，
+    // 否则后续（即使已关闭模组）loadAndPlay 会误判为浮窗模式而无法正常游玩
+    if (floatingWindow.closed) {
+      floatingWindow = null;
+      return null;
+    }
+    return floatingWindow;
   };
 
   const importReplay = async (event: Event) => {
@@ -842,13 +854,16 @@
     loadingPreferences = loadPreferences();
     // 浮窗模式（MW/WW）：主窗口不预下载也不跳转，直接把小窗导航到游玩页。
     // 小窗内会自行 preparePlay（复用游玩页的 fallback 分支），HTTP 缓存让二次加载很快。
-    if (floatingWindow) {
+    // 用 hasFloatingWindow() 而不是直接判断 floatingWindow：玩家可能已在小窗内
+    // 退出并关窗（floatingWindow 指向已关闭窗口），此时应走普通游玩流程。
+    const floatWin = hasFloatingWindow();
+    if (floatWin) {
       rememberSong(item);
       stopPreview();
       // 主窗口停留在选歌页，恢复预览音量（静音是上面准备游玩时开的）
       void setPreviewMuffled(false);
       try {
-        floatingWindow.location.href = `/play/${encodeURIComponent(item.codename)}/${level}?pop=1`;
+        floatWin.location.href = `/play/${encodeURIComponent(item.codename)}/${level}?pop=1`;
       } catch {
         closeFloatingWindow();
         await alertModal('游玩窗口导航失败，请重试');
@@ -926,14 +941,21 @@
       let token = getToken();
       if (!token) {
         const user = await pzPrompt('请输入 PhiZone 用户名：');
-        if (!user) return;
+        if (!user) {
+          closeFloatingWindow();
+          return;
+        }
         const pass = await pzPrompt('请输入 PhiZone 密码：');
-        if (!pass) return;
+        if (!pass) {
+          closeFloatingWindow();
+          return;
+        }
         try {
           await login(user, pass);
           token = getToken();
           pzLoggedIn = true;
         } catch (e) {
+          closeFloatingWindow();
           await alertModal(e instanceof Error ? e.message : '登录失败');
           return;
         }
@@ -944,6 +966,7 @@
         // levelType 0-4 为标准难度；5+（如 WE 等）与选歌列表一致归入 sp 槽位
         const chart = charts.find((c) => (PZ_LEVEL_TYPE[c.levelType] ?? 'sp') === level);
         if (!chart) {
+          closeFloatingWindow();
           await alertModal('该难度没有谱面');
           return;
         }
@@ -963,11 +986,15 @@
           },
         });
       } catch (e) {
+        closeFloatingWindow();
         await alertModal(e instanceof Error ? e.message : '获取谱面失败');
       }
       return;
     }
-    if (s.source !== 'local' && !s.levels[level]?.chart) return;
+    if (s.source !== 'local' && !s.levels[level]?.chart) {
+      closeFloatingWindow();
+      return;
+    }
     await loadAndPlay(s);
   };
 

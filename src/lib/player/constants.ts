@@ -92,6 +92,14 @@ export const RESURRECT_LIFE = 0.5;
 /* 上隐（SU）模组：音符出现时间（visibleTime）的保留比例 */
 export const SUDDEN_VISIBLE_RATIO = 0.4;
 
+/* 上隐（SU）模组：音符出现时的渐显时长（秒）。出现时间缩短后音符不再是
+   全程可见，从透明渐显能避免「凭空蹦出」的生硬感。 */
+export const SUDDEN_FADE_IN_SEC = 0.12;
+
+/* 下隐（HD）模组：长条头部判定后，主体/尾部保持的低透明度。
+   完全消失会让长按失去视觉参照，保留一个淡淡的影子供跟手。 */
+export const HIDDEN_HOLD_ALPHA = 0.35;
+
 /*
     转换器给音符 visibleTime 的默认值是 999999（= 从一开始就可见，无前摇），
     真实前摇由 PhiEditer 的 alpha 事件换算成秒（通常 1~2s）。

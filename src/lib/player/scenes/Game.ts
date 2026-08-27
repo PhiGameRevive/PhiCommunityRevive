@@ -807,6 +807,10 @@ export class Game extends Scene {
     return this._hidden;
   }
 
+  public get sudden() {
+    return this._sudden;
+  }
+
   public get replay() {
     return this._data.replay;
   }
