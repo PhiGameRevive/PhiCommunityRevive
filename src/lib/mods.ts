@@ -42,8 +42,7 @@ export type ModId =
   | 'RR'
   | 'BL'
   | 'MW'
-  | 'WW'
-  | 'DB';
+  | 'WW';
 
 /** 分组：降低难度 / 提升难度 / 特殊（不改变难度）/ 自动（不计分的辅助模式） */
 export type ModCategory = 'reduction' | 'increase' | 'special' | 'auto';
@@ -253,16 +252,6 @@ export const MODS: ModDef[] = [
     scoreMultiplier: 1,
     rankDelta: 0,
     exclusive: 'window',
-    desktopOnly: true,
-  },
-  {
-    id: 'DB',
-    short: 'DB',
-    name: '干扰窗',
-    description: '开局弹出 3 个黑色小窗四处移动，干扰视觉（仅桌面端）',
-    category: 'special',
-    scoreMultiplier: 1,
-    rankDelta: 0,
     desktopOnly: true,
   },
   {

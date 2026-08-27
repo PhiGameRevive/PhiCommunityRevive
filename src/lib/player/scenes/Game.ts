@@ -584,14 +584,29 @@ export class Game extends Scene {
     try {
       // 浏览器可能要求用户手势才能恢复 WebAudio；原生 HTMLAudio 的 play()
       // 也会在无痕/移动浏览器中返回 rejected Promise。
+      // 弹窗模组（MW/WW）在 window.open 的新窗口中无用户手势，
+      // 此时 AudioContext.resume() 的 promise 会一直 pending（等用户交互）。
+      // 不能无限等待——超时绕过后由 play() 的结果暴露自动播放被阻止。
       const context = (this.sound as unknown as { context?: AudioContext }).context;
-      if (context?.state === 'suspended') await context.resume();
+      if (context?.state === 'suspended') {
+        await Promise.race([
+          context.resume(),
+          new Promise<void>((resolve) => setTimeout(resolve, 500)),
+        ]);
+      }
       if (!this._render) {
         await new Promise<void>((resolve, reject) => {
           this._timeout = setTimeout(() => {
             this._clock.play().then(resolve).catch(reject);
           }, 1000 / this.tweens.timeScale);
         });
+      }
+      // play() 成功返回不代表一定出声：context 仍 suspended（自动播放策略阻止）时
+      // Phaser 的 play() 只排队不播放（返回 false），WebAudio 音乐这里再兜底检测一次，
+      // 失败同样走 audio-blocked 让玩家看到「点击播放」按钮。
+      // 视频音乐走原生 HTMLAudioElement，与 AudioContext 无关，跳过该检查。
+      if (!this._data.songIsVideo && context?.state === 'suspended') {
+        throw new Error('音频自动播放被浏览器阻止');
       }
     } catch (error) {
       clearTimeout(this._timeout);

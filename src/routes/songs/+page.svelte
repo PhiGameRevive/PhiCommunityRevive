@@ -9,7 +9,7 @@
   import { alert as alertModal, prompt as pzPrompt } from '$lib/modal';
   import { loadPreferences, savePreferences } from '$lib/preferences';
   import { preparePlay, setPendingPlay, type PlaySource } from '$lib/playLoader';
-  import { isDesktop, openBlackWindows, openFloatingWindow, signalPopupEnd } from '$lib/popupMods';
+  import { isDesktop, openFloatingWindow } from '$lib/popupMods';
   import { takePreloadedSongLists, peekPreloadedSongLists } from '$lib/preload';
   import { swPrecacheUrls } from '$lib/swPreload';
   import {
@@ -480,9 +480,8 @@
     readyCountdown = 0;
     stopLoadingAnimation();
     void setPreviewMuffled(false);
-    // 用户取消进入游玩：关闭已弹出的干扰窗（浮窗模式下主窗口停留选歌页，不会走到这里）
+    // 用户取消进入游玩：关掉已弹出的浮窗（浮窗模式下主窗口停留选歌页，不会走到这里）
     closeFloatingWindow();
-    signalPopupEnd();
   };
 
   /** LOADING 动画的最短展示时长，避免资源命中缓存时一闪而过。 */
@@ -900,9 +899,8 @@
       clearReadyCountdown();
       stopLoadingAnimation();
       void setPreviewMuffled(false);
-      // 未能进入游玩：关掉浮窗并通知干扰窗关闭
+      // 未能进入游玩：关掉浮窗
       closeFloatingWindow();
-      signalPopupEnd();
       await alertModal(e instanceof Error ? e.message : '谱面加载失败');
     }
   };
@@ -912,8 +910,7 @@
     if (!s || starting) return;
     // 桌面弹窗类模组：必须在用户手势同步栈内开窗（进入 async 后再开会被弹窗拦截）
     const needFloating = mods.includes('MW') || mods.includes('WW');
-    const needBlack = mods.includes('DB');
-    if ((needFloating || needBlack) && !isDesktop()) {
+    if (needFloating && !isDesktop()) {
       await alertModal('弹窗类模组仅支持桌面端浏览器（Chrome / Edge）');
       return;
     }
@@ -921,20 +918,6 @@
       floatingWindow = openFloatingWindow();
       if (!floatingWindow) {
         await alertModal('游玩窗口被浏览器拦截：请点击地址栏的弹窗图标，允许本站弹出窗口后重试');
-        return;
-      }
-    }
-    if (needBlack) {
-      // 清除上一批干扰窗的结束信号，避免新一批一打开就自关
-      try {
-        localStorage.removeItem('phiPopupEnd');
-      } catch {
-        /* 忽略 */
-      }
-      const opened = openBlackWindows(3);
-      if (opened === 0) {
-        closeFloatingWindow();
-        await alertModal('干扰窗口被浏览器拦截：请点击地址栏的弹窗图标，允许本站弹出窗口后重试');
         return;
       }
     }

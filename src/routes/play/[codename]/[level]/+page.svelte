@@ -22,7 +22,7 @@
   import { createReplay } from '$lib/replay';
   import { EventBus } from '$lib/player/EventBus';
   import { loadMods, isRecordable, type ModId } from '$lib/mods';
-  import { startPopupDrift, signalPopupEnd } from '$lib/popupMods';
+  import { startPopupDrift } from '$lib/popupMods';
   import type { Game as GameScene } from '$lib/player/scenes/Game';
 
   const codename = page.params.codename ?? '';
@@ -100,8 +100,6 @@
       EventBus.on('audio-blocked', stopDriftAndClear);
       EventBus.on('started', startDrift);
     }
-    // 小窗被关闭（window.close / 关标签页）时也要通知干扰窗结束
-    window.addEventListener('beforeunload', signalPopupEnd);
     try {
       let replay: import('$lib/types').ReplayFile | undefined;
       const replayRaw = sessionStorage.getItem('pendingReplay');
@@ -156,10 +154,8 @@
   loadingTip = randomTip();
 
   onDestroy(() => {
-    // 停止小窗漂移并通知干扰窗结束（浮窗模式下窗口关闭/离开页面都会触发）
+    // 停止小窗漂移
     stopDriftAndClear();
-    signalPopupEnd();
-    window.removeEventListener('beforeunload', signalPopupEnd);
     EventBus.off('finished', handleFinished);
     EventBus.off('current-scene-ready', onSceneReady);
     EventBus.off('paused', stopDriftAndClear);

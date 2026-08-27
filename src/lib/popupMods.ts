@@ -1,5 +1,5 @@
-/**
- * 桌面端弹窗类模组（MW 律动窗 / WW 游走窗 / DB 干扰窗）。
+﻿/**
+ * 桌面端弹窗类模组（MW 律动窗 / WW 游走窗）。
  *
  * 浏览器限制：
  *  - window.open 必须在用户手势的同步调用栈内执行，否则被弹窗拦截器拦掉；
@@ -7,8 +7,6 @@
  *    普通标签页、移动端 Safari / Chrome 均无法移动窗口。
  *    因此本模块只面向桌面 Chromium（Chrome / Edge），Firefox 桌面大概率可用。
  */
-
-export const POPUP_END_KEY = 'phiPopupEnd';
 
 /** 判断是否为桌面端（主要输入设备为鼠标/触控板） */
 export const isDesktop = (): boolean => {
@@ -20,15 +18,6 @@ export const isDesktop = (): boolean => {
     );
   } catch {
     return false;
-  }
-};
-
-/** 结束信号：游玩退出 / 加载失败时写入，黑窗轮询到后自动关闭 */
-export const signalPopupEnd = (): void => {
-  try {
-    localStorage.setItem(POPUP_END_KEY, String(Date.now()));
-  } catch {
-    /* 存储不可用时黑窗会靠兜底时长自关 */
   }
 };
 
@@ -89,7 +78,7 @@ const detectMovable = (): boolean => {
 
 /**
  * 在小窗内启动窗口漂移。kind：
- *  - 'music'：随音乐 bass 能量在起始位置附近律动（需要 getAnalyser 提供频谱）
+ *  - 'music'：慢速 Lissajous 轨迹全屏漫游，叠加 bass 能量驱动的律动抖动
  *  - 'wander'：随机游走 + 屏幕边界反弹
  * 返回停止函数；浏览器不允许移动 / 拿不到频谱时返回空函数并 alert 提示。
  */
@@ -203,78 +192,4 @@ export const startPopupDrift = (
   };
   window.addEventListener('beforeunload', stop);
   return stop;
-};
-
-/* ---------------- 黑窗（DB 干扰窗） ---------------- */
-
-const BLACK_FEATURES =
-  'width=100,height=100,outerWidth=100,outerHeight=100,menubar=no,toolbar=no,location=no,status=no,resizable=no,scrollbars=no';
-
-/** 黑窗自驱脚本：随机游走 + 边界反弹 + 结束信号变化检测 + opener 关闭检测，并有兜底时长 */
-const BLACK_WINDOW_SCRIPT = `
-(() => {
-  var STEP = 7;
-  var vx = (Math.random() * 2 - 1) * STEP;
-  var vy = (Math.random() * 2 - 1) * STEP;
-  var KEY = 'phiPopupEnd';
-  var initial = null;
-  try { initial = localStorage.getItem(KEY); } catch (e) { initial = null; }
-  var tick = function () {
-    try {
-      var now = localStorage.getItem(KEY);
-      if (now !== null && now !== initial) { self.close(); return; }
-      if (self.opener && self.opener.closed) { self.close(); return; }
-      // 尺寸守卫：Chrome 有时不按 features 尺寸打开弹窗，发现被撑大时拉回 100×100
-      try {
-        if (self.outerWidth > 112 || self.outerHeight > 112) { self.resizeTo(100, 100); }
-      } catch (e) {}
-      var w = self.outerWidth || 100;
-      var h = self.outerHeight || 100;
-      var maxX = (self.screen.availWidth || 1280) - w - 4;
-      var maxY = (self.screen.availHeight || 800) - h - 4;
-      var nx = self.screenX + vx;
-      var ny = self.screenY + vy;
-      if (nx < 0) { nx = 0; vx = Math.abs(vx) * (0.7 + Math.random() * 0.5); }
-      if (ny < 0) { ny = 0; vy = Math.abs(vy) * (0.7 + Math.random() * 0.5); }
-      if (nx > maxX) { nx = maxX; vx = -Math.abs(vx) * (0.7 + Math.random() * 0.5); }
-      if (ny > maxY) { ny = maxY; vy = -Math.abs(vy) * (0.7 + Math.random() * 0.5); }
-      self.moveTo(Math.round(nx), Math.round(ny));
-    } catch (e) { self.close(); }
-  };
-  setInterval(tick, 40);
-  setTimeout(function () { try { self.close(); } catch (e) {} }, 180000);
-})();
-`;
-
-/**
- * 弹出 count 个黑色干扰小窗（各自随机游走）。返回实际打开的数量。
- * 必须在用户手势同步栈内调用以获得弹窗许可。
- */
-export const openBlackWindows = (count = 3): number => {
-  let opened = 0;
-  for (let i = 0; i < count; i++) {
-    const win = window.open(
-      '',
-      `phi_black_${i}_${Math.floor(Math.random() * 1e6)}`,
-      BLACK_FEATURES,
-    );
-    if (!win) continue;
-    try {
-      win.document.write(
-        '<!doctype html><html><head><meta charset="utf-8"></head>' +
-          '<body style="margin:0;overflow:hidden;background:#000;cursor:default">' +
-          '<script>' + BLACK_WINDOW_SCRIPT + '<\/script>' +
-          '</body></html>',
-      );
-      win.document.close();
-      opened++;
-    } catch {
-      try {
-        win.close();
-      } catch {
-        /* 忽略 */
-      }
-    }
-  }
-  return opened;
 };
