@@ -3,7 +3,7 @@
    * 新版开场动画（19 秒时间轴，配 TapToStartNew.mp3）。
    *
    * 音乐高潮位于 19~20 秒，19.0s 处画面同步炸开：背景揭晓 + Title + TAP TO START + 花瓣飘落。
-   * 高潮之前依次是 logo、免责声明、启动日志、版本卡片，最后 1.6 秒刻意留白到纯黑，
+   * 高潮之前依次是 logo、免责声明、版本卡片、特别鸣谢，最后 1.4 秒刻意留白到纯黑，
    * 让高潮命中时的视觉冲击最大化。
    *
    * 音频由父组件在"节点选择页点击"这一用户手势中解锁并解码后传入，
@@ -29,15 +29,13 @@
   const T = {
     scanlines: 0.4,
     logoIn: 1.2,
-    logoOut: 4.6,
-    disclaimerIn: 5.0,
-    disclaimerOut: 8.2,
-    bootLogIn: 8.6,
-    bootLogOut: 12.6,
-    versionIn: 12.9,
-    versionOut: 15.2,
-    thanksIn: 15.6,
-    thanksOut: 18.4,
+    logoOut: 5.6,
+    disclaimerIn: 6.0,
+    disclaimerOut: 10.2,
+    versionIn: 10.6,
+    versionOut: 13.9,
+    thanksIn: 14.3,
+    thanksOut: 18.1,
     /**
      * 音乐高潮命中：一切揭晓。
      * 高潮区间为 19~20 秒，取 19.5 让画面比鼓点稍晚半拍落下，冲击感更足。
@@ -45,23 +43,12 @@
     climax: 19.5,
   };
 
-  /** 启动日志：把刚才真实完成的预载结果亮出来（等宽字体逐字打出） */
-  const BOOT_LOG: { at: number; text: string }[] = [
-    { at: 8.6, text: '> init  phi-community-revive .......... ok' },
-    { at: 9.4, text: '> mount chart sources  (phi/ptc/pz) ... ok' },
-    { at: 10.2, text: '> cache game assets ................... ok' },
-    { at: 11.0, text: '> warm  phaser engine ................. ok' },
-    { at: 11.8, text: '> ready' },
-  ];
-  /** 打字速度（字符/秒） */
-  const TYPE_CPS = 46;
-
   /** 特别鸣谢：逐条错开出现（各自的 at 为出现时刻） */
   const THANKS: { at: number; name: string; role: string }[] = [
-    { at: 16.0, name: 'PhiCommunity', role: '原版项目 · yuameshi' },
-    { at: 16.6, name: 'PhiZone', role: 'Player 引擎, 谱面资源' },
-    { at: 17.2, name: 'PhiTogether', role: '谱面资源' },
-    { at: 17.8, name: 'OSU!Lazer', role: '灵感设计' },
+    { at: 14.7, name: 'PhiCommunity', role: '原版项目 · yuameshi' },
+    { at: 15.3, name: 'PhiZone', role: 'Player 引擎, 谱面资源' },
+    { at: 15.9, name: 'PhiTogether', role: '谱面资源' },
+    { at: 16.5, name: 'OSU!Lazer', role: '灵感设计' },
   ];
 
   let elapsed = 0;
@@ -163,18 +150,10 @@
     onDone();
   };
 
-  /** 逐字打出：返回该行当前应显示的文本 */
-  const typed = (line: { at: number; text: string }, t: number): string => {
-    if (t < line.at) return '';
-    const chars = Math.floor((t - line.at) * TYPE_CPS);
-    return line.text.slice(0, chars);
-  };
-
   // 各段可见性（跳过后 elapsed 直接等于 climax，前摇元素自然全部隐藏）
   $: showScanlines = elapsed >= T.scanlines;
   $: showLogo = elapsed >= T.logoIn && elapsed < T.logoOut;
   $: showDisclaimer = elapsed >= T.disclaimerIn && elapsed < T.disclaimerOut;
-  $: showBootLog = elapsed >= T.bootLogIn && elapsed < T.bootLogOut;
   $: showVersion = elapsed >= T.versionIn && elapsed < T.versionOut;
   $: showThanks = elapsed >= T.thanksIn && elapsed < T.thanksOut;
   $: climax = elapsed >= T.climax;
@@ -215,19 +194,7 @@
     <p>仅供学习交流，请勿用于商业用途。</p>
   </div>
 
-  <!-- ③ 启动日志（逐字打出，展示刚完成的预载结果） -->
-  <div class="stage boot-log" class:on={showBootLog}>
-    {#each BOOT_LOG as line}
-      {@const text = typed(line, elapsed)}
-      {#if text}
-        <p class="log-line" class:done={text.length === line.text.length}>
-          {text}<span class="caret" class:hidden={text.length === line.text.length}>_</span>
-        </p>
-      {/if}
-    {/each}
-  </div>
-
-  <!-- ④ 版本卡片 -->
+  <!-- ③ 版本卡片 -->
   <div class="stage version-card" class:on={showVersion}>
     <span class="vc-label">PHICOMMUNITY REVIVE</span>
     <strong class="vc-version">{version}</strong>
@@ -415,45 +382,6 @@
 
   .disclaimer-stage p {
     margin: 0;
-  }
-
-  /* ---- ③ 启动日志 ---- */
-  .boot-log {
-    align-items: flex-start;
-    justify-content: center;
-    gap: 8px;
-    padding: 0 clamp(24px, 12vw, 180px);
-    font-family: var(--phi-mono);
-    font-size: clamp(0.66rem, 1.5vw, 0.86rem);
-    letter-spacing: 0.06em;
-    color: rgba(255, 255, 255, 0.62);
-  }
-
-  .log-line {
-    margin: 0;
-    white-space: pre;
-  }
-
-  .log-line.done {
-    color: rgba(255, 255, 255, 0.82);
-  }
-
-  .caret {
-    animation: caret-blink 0.7s steps(1) infinite;
-  }
-
-  .caret.hidden {
-    visibility: hidden;
-  }
-
-  @keyframes caret-blink {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0;
-    }
   }
 
   /* ---- ④ 版本卡片 ---- */
