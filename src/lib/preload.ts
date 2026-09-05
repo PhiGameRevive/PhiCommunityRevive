@@ -45,6 +45,36 @@ export const takePreloadedSongLists = (): PreloadedSongLists | null => {
 /** 只读查看预载结果（不取走）。选歌页进入加载界面时可立即用其随机选封面。 */
 export const peekPreloadedSongLists = (): PreloadedSongLists | null => lists;
 
+/* ---------------- 会话内歌曲列表缓存（避免二次进入选歌页重新拉取） ---------------- */
+
+/**
+ * 歌曲列表的会话级缓存（仅内存，随页面整刷而重置）。
+ *
+ * 目的：进入 /play、设置等页面后再返回选歌页时，选歌页组件重新挂载，
+ * 若不缓存则会对 phi / ptc 源重新发起上百个网络请求并展示全屏加载遮罩，
+ * 观感等同整页刷新。这里把一次成功拉取的结果留在模块内，SPA 会话期间
+ * 再次进入选歌页直接命中，实现 URL 变化但无加载态的丝滑跳转。
+ */
+interface SessionSongLists {
+  phi: SourceSong[] | null;
+  ptc: SourceSong[] | null;
+  pz: SourceSong[] | null;
+}
+
+let session: SessionSongLists = { phi: null, ptc: null, pz: null };
+
+/** 读取某源的会话缓存（未缓存过返回 null） */
+export const getCachedSongList = (source: 'phi' | 'ptc' | 'pz'): SourceSong[] | null => session[source];
+
+/**
+ * 写入某源的会话缓存。phi/ptc 仅在拉取到非空列表后写入（避免失败空结果
+ * 占用缓存导致反复进入都秒开空列表）；pz 在手动加载成功后写入（空也记录，
+ * 表示「已加载过」以显示空状态而非回到加载按钮）。
+ */
+export const setCachedSongList = (source: 'phi' | 'ptc' | 'pz', list: SourceSong[]): void => {
+  session[source] = list;
+};
+
 /**
  * 后台预热 Phaser 引擎包。模块导入本身无副作用（game 实例由 start() 按需创建）。
  * 幂等：同一时刻只预热一次。

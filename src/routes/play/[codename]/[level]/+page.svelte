@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { writable } from 'svelte/store';
   import { page } from '$app/state';
+  import { goto } from '$app/navigation';
   import Player from '$lib/player/Player.svelte';
   import PhigrosLoading from '$lib/components/PhigrosLoading.svelte';
   import { randomTip } from '$lib/loadingTips';
@@ -288,7 +289,8 @@
     if (isPopup) {
       window.close();
     } else {
-      location.href = '/songs';
+      // 客户端路由返回，不做整页刷新（资源/引擎已在离开时销毁）
+      void goto('/songs');
     }
   };
 </script>

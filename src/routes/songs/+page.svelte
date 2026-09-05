@@ -10,7 +10,7 @@
   import { loadPreferences, savePreferences } from '$lib/preferences';
   import { preparePlay, setPendingPlay, type PlaySource } from '$lib/playLoader';
   import { isDesktop, openFloatingWindow } from '$lib/popupMods';
-  import { takePreloadedSongLists, peekPreloadedSongLists } from '$lib/preload';
+  import { takePreloadedSongLists, peekPreloadedSongLists, getCachedSongList, setCachedSongList } from '$lib/preload';
   import { swPrecacheUrls } from '$lib/swPreload';
   import {
     MODS,
@@ -561,6 +561,56 @@
     };
   };
 
+  /** 在线源列表 → 页内歌曲条目（补源前缀 codename / pz 的 chartId） */
+  const toSongItems = (source: 'phi' | 'ptc' | 'pz', list: SourceSong[]): SongItem[] =>
+    list.map((s) => {
+      const item: SongItem = {
+        codename: `${source}-${s.id}`,
+        source,
+        name: s.name,
+        artist: s.artist,
+        illustrationUrl: s.illustration,
+        songUrl: s.song,
+        levels: s.levels,
+        backgroundAnimation: s.backgroundAnimation,
+        songIsVideo: s.songIsVideo,
+      };
+      if (source === 'pz') item.id = s.id;
+      return item;
+    });
+
+  /**
+   * 会话内秒开：本次 SPA 会话已加载过 phi/ptc 列表时，组件初始化阶段就直接用
+   * 缓存填充在线歌曲并跳过全屏加载遮罩/骨架屏，让从游玩/设置返回选歌页时
+   * 呈现 URL 变化、页面即时就绪的无加载体验（首次冷进入仍走下方完整加载流程）。
+   */
+  const sessionPhi = getCachedSongList('phi');
+  const sessionPtc = getCachedSongList('ptc');
+  const sessionWarm = !!sessionPhi && !!sessionPtc;
+  if (sessionWarm) {
+    songsBySource.phi = toSongItems('phi', sessionPhi as SourceSong[]);
+    songsBySource.ptc = toSongItems('ptc', sessionPtc as SourceSong[]);
+    const cachedPz = getCachedSongList('pz');
+    if (cachedPz) {
+      songsBySource.pz = toSongItems('pz', cachedPz);
+      pzLoaded = true;
+    }
+    // 与常规进入一致：首帧即随机展示一首在线曲（避免每次固定停在第一首）。
+    // 会话缓存只含 phi/ptc（pz 列表默认按需加载，只有加载过才会出现在缓存里）
+    const warmPool = [...songsBySource.phi, ...songsBySource.ptc, ...(pzLoaded ? songsBySource.pz : [])];
+    const warmSong = warmPool[Math.floor(Math.random() * warmPool.length)];
+    if (warmSong) {
+      const warmSource = warmSong.source as ChartSourceId;
+      activeSource = warmSource;
+      current = songsBySource[warmSource].findIndex((item) => item.codename === warmSong.codename);
+      const warmLp = LEVELS.find((l) => warmSong.levels[l]);
+      if (warmLp) level = warmLp;
+    }
+    // 本地谱面/成绩等仍异步补充，但列表主体立即可见：不再进入全屏加载
+    loaded = true;
+    pageReveal = true;
+  }
+
   onMount(async () => {
     // 桌面端检测：SSR/hydration 时 matchMedia 不可用或为初始值，须在客户端挂载后取值
     desktopOnlyAvailable = isDesktop();
@@ -585,19 +635,28 @@
       if (peekUrls.length > 0) coverPool = peekUrls;
     }
     pickCover();
-    // 进入页面即展示加载界面：进度条随经过时间推进，数据就绪后走满
-    pageLoadingStart = performance.now();
-    pageTip = randomTip();
-    pageProgressTimer = window.setInterval(() => {
-      pageProgress = Math.min((performance.now() - pageLoadingStart) / MIN_PAGE_LOADING_MS, 0.9);
-    }, 60);
+    // 进入页面即展示加载界面：进度条随经过时间推进，数据就绪后走满。
+    // 会话缓存命中（sessionWarm）时组件初始化已完成列表填充，不展示加载界面
+    if (!sessionWarm) {
+      pageLoadingStart = performance.now();
+      pageTip = randomTip();
+      pageProgressTimer = window.setInterval(() => {
+        pageProgress = Math.min((performance.now() - pageLoadingStart) / MIN_PAGE_LOADING_MS, 0.9);
+      }, 60);
+    }
     try {
-      // 开场动画期间已预载谱面源列表（不含 pz），命中则直接使用（跳过重复的网络请求）
-      const pre = takePreloadedSongLists();
-      // 默认只拉取 phi / ptc：PhiZone 列表最慢，改为点开对应 Tab 时按需加载（见 loadPz）
-      const [phi, ptc, pz, locals] = pre
-        ? [pre.phi, pre.ptc, pre.pz, await getAllLocalCharts()]
-        : await Promise.all([
+      let phi: SourceSong[] = [];
+      let ptc: SourceSong[] = [];
+      let pz: SourceSong[] = [];
+      let locals: LocalChart[] = [];
+      if (!sessionWarm) {
+        // 开场动画期间已预载谱面源列表（不含 pz），命中则直接使用（跳过重复的网络请求）
+        const pre = takePreloadedSongLists();
+        if (pre) {
+          [phi, ptc, pz, locals] = [pre.phi, pre.ptc, pre.pz, await getAllLocalCharts()];
+        } else {
+          // 默认只拉取 phi / ptc：PhiZone 列表最慢，改为点开对应 Tab 时按需加载（见 loadPz）
+          [phi, ptc, pz, locals] = await Promise.all([
             fetchSongs('phi').catch((e) => {
               console.error('phi source failed', e);
               return [];
@@ -609,39 +668,18 @@
             Promise.resolve([] as SourceSong[]),
             getAllLocalCharts(),
           ]);
-      pzLoaded = !!pre && pre.pz.length > 0;
-      songsBySource.phi = phi.map((s) => ({
-        codename: `phi-${s.id}`,
-        source: 'phi',
-        name: s.name,
-        artist: s.artist,
-        illustrationUrl: s.illustration,
-        songUrl: s.song,
-        levels: s.levels,
-        backgroundAnimation: s.backgroundAnimation,
-        songIsVideo: s.songIsVideo,
-      }));
-      songsBySource.ptc = ptc.map((s) => ({
-        codename: `ptc-${s.id}`,
-        source: 'ptc',
-        name: s.name,
-        artist: s.artist,
-        illustrationUrl: s.illustration,
-        songUrl: s.song,
-        levels: s.levels,
-        backgroundAnimation: s.backgroundAnimation,
-        songIsVideo: s.songIsVideo,
-      }));
-      songsBySource.pz = pz.map((s) => ({
-        codename: `pz-${s.id}`,
-        id: s.id,
-        source: 'pz',
-        name: s.name,
-        artist: s.artist,
-        illustrationUrl: s.illustration,
-        songUrl: s.song,
-        levels: s.levels,
-      }));
+        }
+        // 写回会话缓存：之后从游玩/设置返回选歌页不再走网络、不再出现加载遮罩
+        if (phi.length > 0) setCachedSongList('phi', phi);
+        if (ptc.length > 0) setCachedSongList('ptc', ptc);
+        pzLoaded = !!pre && pre.pz.length > 0;
+        songsBySource.phi = toSongItems('phi', phi);
+        songsBySource.ptc = toSongItems('ptc', ptc);
+        songsBySource.pz = toSongItems('pz', pz);
+      } else {
+        // 会话缓存命中：列表已在组件初始化阶段填入，仅补读本地谱面
+        locals = await getAllLocalCharts();
+      }
       localSongs = locals.map(localToItem);
 
       // 成绩（兼容旧项目：历史记录以无源前缀的原始 codename 为 key，未命中时回退）
@@ -663,20 +701,25 @@
       const all = await getAllResults();
       rks = all.reduce((max, r) => Math.max(max, r.rankingScore), 0);
 
-      // 首次进入选歌页时从已加载的在线谱面源随机挑一首，避免每次固定落在 PhiCommunity 第一首。
-      // 不包含 local；pz 默认未加载时也不参与随机（只有预载命中或手动打开过 PhiZone 才计入）。
-      const onlinePool = [...songsBySource.phi, ...songsBySource.ptc, ...(pzLoaded ? songsBySource.pz : [])];
-      const randomSong = onlinePool[Math.floor(Math.random() * onlinePool.length)];
-      if (randomSong) {
-        // 在线池只由 phi/ptc/pz 组成，随机结果不可能落到 local
-        const source = randomSong.source as ChartSourceId;
-        activeSource = source;
-        current = songsBySource[source].findIndex((item) => item.codename === randomSong.codename);
-        const lp = LEVELS.find((l) => randomSong.levels[l]);
-        if (lp) level = lp;
+      if (sessionWarm) {
+        // 初始化时已随机选中曲目并置 loaded；此处仅补充试听
+        playPreview(song() ?? currentList()[0] ?? null);
+      } else {
+        // 首次进入选歌页时从已加载的在线谱面源随机挑一首，避免每次固定落在 PhiCommunity 第一首。
+        // 不包含 local；pz 默认未加载时也不参与随机（只有预载命中或手动打开过 PhiZone 才计入）。
+        const onlinePool = [...songsBySource.phi, ...songsBySource.ptc, ...(pzLoaded ? songsBySource.pz : [])];
+        const randomSong = onlinePool[Math.floor(Math.random() * onlinePool.length)];
+        if (randomSong) {
+          // 在线池只由 phi/ptc/pz 组成，随机结果不可能落到 local
+          const source = randomSong.source as ChartSourceId;
+          activeSource = source;
+          current = songsBySource[source].findIndex((item) => item.codename === randomSong.codename);
+          const lp = LEVELS.find((l) => randomSong.levels[l]);
+          if (lp) level = lp;
+        }
+        loaded = true;
+        playPreview(randomSong ?? currentList()[0] ?? null);
       }
-      loaded = true;
-      playPreview(randomSong ?? currentList()[0] ?? null);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       loaded = true;
@@ -699,9 +742,11 @@
       // 二次访问选歌页时封面直接命中 Cache Storage 秒显示，离线也能正常渲染列表
       swPrecacheUrls(urls);
     }
-    window.setTimeout(() => {
-      pageReveal = true;
-    }, 500);
+    if (!sessionWarm) {
+      window.setTimeout(() => {
+        pageReveal = true;
+      }, 500);
+    }
 
     // 全局监听拖拽移动/释放（指针离开列表项后仍能跟随）
     window.addEventListener('pointermove', onPointerMove);
@@ -732,6 +777,8 @@
     try {
       const list = await fetchSongs('pz');
       if (run !== pzRun) return; // 已切走或组件销毁
+      // 写入会话缓存：回到选歌页时 pz 列表同样秒开（无需重新请求）
+      setCachedSongList('pz', list);
       const items: SongItem[] = list.map((s) => ({
         codename: `pz-${s.id}`,
         id: s.id,
@@ -1012,7 +1059,9 @@
   <title>选歌 - PhiCommunity</title>
 </svelte:head>
 
-<!-- 全屏加载界面：数据拉取中显示，就绪后进度走满并淡出（结算/设置/中途退出回到本页同样展示） -->
+<!-- 全屏加载界面：数据拉取中显示，就绪后进度走满并淡出。
+     仅首次冷进入 / 整页刷新时出现；会话内从游玩/设置等页面返回时已由
+     组件初始化阶段的会话缓存秒开（sessionWarm），不会出现本遮罩。 -->
 {#if !pageReveal && !error}
   <div class="page-loading-mask" class:leaving={loaded}>
     <PhigrosLoading cover={pageCover} tip={pageTip} progress={loaded ? 1 : pageProgress} />
@@ -1046,7 +1095,7 @@
   <div class="phi-page">
     <h1 class="phi-title">选歌</h1>
     <p class="phi-hint">加载失败：{error}</p>
-    <button onclick={() => (location.href = '/')}>返回主页</button>
+    <button onclick={() => goto('/')}>返回主页</button>
   </div>
 {:else}
   {@const s = song()}
