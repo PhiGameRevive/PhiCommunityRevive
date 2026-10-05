@@ -51,6 +51,7 @@ import { ResourcePackHandler } from '../handlers/ResourcePackHandler';
 import { m } from '$lib/messages';
 import {
   EARLY_FINISH_DELAY,
+  EARLY_FINISH_MIN_OUTRO_SEC,
   FAIL_SLOWDOWN_MS,
   HOLD_TAIL_TOLERANCE,
   LIFE_PENALTY_BAD,
@@ -840,6 +841,17 @@ export class Game extends Scene {
       return;
     }
     this._status = GameStatus.FINISHED;
+    // 提前结算时歌曲尾奏可能尚未播完：保持播放，让其自然收尾（不硬切）。
+    // 尾奏与结算音乐不会重叠——ResultsUI 在 earlyFinish 时已跳过结算音乐。
+    // 先创建结算 UI 再触发淡出：out() 的 tween 在极端情况下会同步完成
+    // （例如提前结算时判定线/视频已淡到 alpha 0，补间无实际变化），
+    // 此时 onComplete 会在本行之后再执行，若仍把赋值放在 out() 之后，
+    // onComplete 里的 this._resultsUI 会是 undefined 并抛错。
+    this._resultsUI = new ResultsUI(
+      this,
+      this._resultsMusic,
+      this._data.mediaOptions.resultsLoopsToRender,
+    );
     this.out(() => {
       this.resetShadersAndVideos();
       this._resultsUI!.play();
@@ -851,11 +863,6 @@ export class Game extends Scene {
         },
       });
     });
-    this._resultsUI = new ResultsUI(
-      this,
-      this._resultsMusic,
-      this._data.mediaOptions.resultsLoopsToRender,
-    );
   }
 
   sortObjects() {
@@ -1108,13 +1115,17 @@ export class Game extends Scene {
       this._status = status;
       this._isSeeking = false;
     }
-    // 提前结算：最后一个音符判定结束后直接出结算，不等音乐播完（练习模式仍由 end() 走暂停）
+    // 提前结算：最后一个音符判定结束后直接出结算，不等音乐播完（练习模式仍由 end() 走暂停）。
+    // 但尾奏过短时不提前结算——此时音乐马上就会自然结束，提前出结算会让结算动画
+    // 与尚未播完的尾奏重叠。尾奏长（剩余 ≥ EARLY_FINISH_MIN_OUTRO_SEC）才提前结算。
+    const outroRemaining = this._song.duration - this._outroStart;
     if (
       !this.fastForwarding &&
       this._earlyFinish &&
       !this._practice &&
       this._status === GameStatus.PLAYING &&
-      this.timeSec >= this._earlyFinishTime
+      this.timeSec >= this._earlyFinishTime &&
+      outroRemaining >= EARLY_FINISH_MIN_OUTRO_SEC
     ) {
       this.end();
     }

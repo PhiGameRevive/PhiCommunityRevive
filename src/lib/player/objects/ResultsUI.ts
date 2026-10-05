@@ -12,7 +12,7 @@ import { EventBus } from '../EventBus';
 export class ResultsUI extends GameObjects.Container {
   private _scene: Game;
   private _innerContainer: GameObjects.Container;
-  private _sound: Sound.NoAudioSound | Sound.HTML5AudioSound | Sound.WebAudioSound;
+  private _sound: Sound.NoAudioSound | Sound.HTML5AudioSound | Sound.WebAudioSound | undefined;
   private _illustration: GameObjects.Container;
   private _overlay: GameObjects.Rectangle;
   private _grade: GameObjects.Image;
@@ -251,19 +251,24 @@ export class ResultsUI extends GameObjects.Container {
     this._overlay.setAlpha(0);
 
     if (!this._scene.render) {
-      this._sound = this._scene.sound.add('ending');
-      this._sound.setVolume(this._scene.preferences.musicVolume).play();
+      // 提前结算：歌曲还有尾奏没播完就出结算，此时不播结算音乐，
+      // 避免与尚未结束的曲目/突兀的循环重叠（等级揭示音效仍保留）
+      if (!this._scene.earlyFinish) {
+        const sound = this._scene.sound.add('ending');
+        this._sound = sound;
+        sound.setVolume(this._scene.preferences.musicVolume).play();
+        this._timer = setInterval(
+          () => {
+            sound.play();
+          },
+          (this._beatLength * this._beats) / this._scene.tweens.timeScale,
+        );
+      }
       this._scene.sound
         .add('grade-hit')
         .setVolume(this._scene.preferences.hitSoundVolume)
         .setRate(this._bpm / 140)
         .play();
-      this._timer = setInterval(
-        () => {
-          this._sound.play();
-        },
-        (this._beatLength * this._beats) / this._scene.tweens.timeScale,
-      );
     }
 
     this._tweening = true;

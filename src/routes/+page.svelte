@@ -263,11 +263,10 @@
     exitTimer = window.setTimeout(() => {
       stage = 'loading';
       startLoading();
-      // 首次用户先完成基础设置；设置页返回时再自动进入 PTC 新手教程
+      // 首次用户先完成基础设置：落到选歌页后自动弹出设置侧边栏，
+      // 关闭侧边栏时由选歌页询问是否进入 PTC 新手教程
       if (!localStorage.getItem('phiOnboardingDone')) {
-        sessionStorage.setItem('firstUserSetupReturn', 'tutorial');
-        window.setTimeout(() => goto('/settings'), 500);
-        return;
+        sessionStorage.setItem('firstUserSetup', '1');
       }
       tipText = randomTip();
       // 谱面列表就绪后随机挑一首曲绘当加载背景（未就绪时用默认图兜底）

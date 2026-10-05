@@ -3,10 +3,11 @@
   import { fly } from 'svelte/transition';
   import { goto } from '$app/navigation';
   import { getResult, getAllResults, getAllReplays, getAllLocalCharts, saveReplay, deleteReplay, type LocalChart } from '$lib/db';
+  import { cacheOnlineSong } from '$lib/localCache';
   import { getRank, type Level, type Rank } from '$lib/meta';
   import { fetchSongs, SOURCE_LABELS, type ChartSourceId, type SourceSong } from '$lib/sources';
   import { fetchPzCharts, fetchPzChartFile, getToken, login, setToken, PZ_LEVEL_TYPE } from '$lib/phizone';
-  import { alert as alertModal, prompt as pzPrompt } from '$lib/modal';
+  import { alert as alertModal, confirm as confirmModal, prompt as pzPrompt } from '$lib/modal';
   import { loadPreferences, savePreferences } from '$lib/preferences';
   import { preparePlay, setPendingPlay, type PlaySource } from '$lib/playLoader';
   import { isDesktop, openFloatingWindow } from '$lib/popupMods';
@@ -26,6 +27,7 @@
     type ModId,
   } from '$lib/mods';
   import PhigrosLoading from '$lib/components/PhigrosLoading.svelte';
+  import SettingsSidebar from '$lib/components/SettingsSidebar.svelte';
   import { randomTip } from '$lib/loadingTips';
   import { downloadReplay, readReplayFile } from '$lib/replay';
   import type { ReplayFile } from '$lib/types';
@@ -58,7 +60,9 @@
 
   let songsBySource: Record<ChartSourceId, SongItem[]> = { phi: [], ptc: [], pz: [] };
   let localSongs: SongItem[] = [];
-  let activeSource: ChartSourceId | 'local' = 'phi';
+  let activeSource: ChartSourceId | 'local' = 'local';
+  /** 会话秒开阶段预选的随机在线曲；本地列表就绪后若本地为空则回落到它 */
+  let warmSong: SongItem | null = null;
   let showRecords = false;
   let records: import('$lib/db').PlayResult[] = [];
   let replays: ReplayFile[] = [];
@@ -172,6 +176,30 @@
   let readyResolve: (() => void) | null = null;
   let settingsHover = false;
   let settingsPressed = false;
+  /** 内联设置侧边栏开关（齿轮按钮 / 首次启动自动打开） */
+  let showSettings = false;
+  /** 本次侧边栏是否为首次启动流程（关闭时需弹新手教程提示） */
+  let settingsFirstFlow = false;
+  /** 首次启动标记：开场结束后跳转到选歌页时写入，选歌页消费后移除 */
+  const FIRST_SETUP_FLAG = 'firstUserSetup';
+
+  /**
+   * 关闭设置侧边栏。
+   * - 首次启动流程且用户主动关闭（点空白/退出/完成）→ 弹窗询问是否进入新手教程
+   * - navigate=true（校准/观看教学）→ 已在跳转，跳过询问
+   * 无论哪种情况都标记 `phiOnboardingDone`，避免重复弹出。
+   */
+  const closeSettings = (event: CustomEvent<{ navigate: boolean }>) => {
+    const navigate = event.detail?.navigate ?? false;
+    showSettings = false;
+    if (!settingsFirstFlow) return;
+    settingsFirstFlow = false;
+    localStorage.setItem('phiOnboardingDone', 'true');
+    if (navigate) return;
+    void confirmModal('是否要进行新手教程？').then((yes) => {
+      if (yes) void goto('/play/ptc-r-intro/hd');
+    });
+  };
   let loadingPreferences = loadPreferences();
   let previewContext: AudioContext | null = null;
   let previewSource: MediaElementAudioSourceNode | null = null;
@@ -595,17 +623,11 @@
       songsBySource.pz = toSongItems('pz', cachedPz);
       pzLoaded = true;
     }
-    // 与常规进入一致：首帧即随机展示一首在线曲（避免每次固定停在第一首）。
+    // 会话秒开时不再强制切到某个在线源：默认来源由 activeSource 决定（本地优先），
+    // 本地列表在 onMount 异步补入后，若为空再回落到随机在线曲（见 onMount 末尾）。
     // 会话缓存只含 phi/ptc（pz 列表默认按需加载，只有加载过才会出现在缓存里）
     const warmPool = [...songsBySource.phi, ...songsBySource.ptc, ...(pzLoaded ? songsBySource.pz : [])];
-    const warmSong = warmPool[Math.floor(Math.random() * warmPool.length)];
-    if (warmSong) {
-      const warmSource = warmSong.source as ChartSourceId;
-      activeSource = warmSource;
-      current = songsBySource[warmSource].findIndex((item) => item.codename === warmSong.codename);
-      const warmLp = LEVELS.find((l) => warmSong.levels[l]);
-      if (warmLp) level = warmLp;
-    }
+    warmSong = warmPool[Math.floor(Math.random() * warmPool.length)] ?? null;
     // 本地谱面/成绩等仍异步补充，但列表主体立即可见：不再进入全屏加载
     loaded = true;
     pageReveal = true;
@@ -682,6 +704,26 @@
       }
       localSongs = locals.map(localToItem);
 
+      // 默认来源：本地优先。本地列表此时才异步就绪，所以在这里决定首屏选曲：
+      // 有本地谱面就停在本地第一首；否则回落到随机在线曲（避免新用户面对空列表）。
+      if (localSongs.length > 0) {
+        activeSource = 'local';
+        current = 0;
+        const lp = LEVELS.find((l) => localSongs[0].levels[l]);
+        if (lp) level = lp;
+      } else {
+        const onlinePool = [...songsBySource.phi, ...songsBySource.ptc, ...(pzLoaded ? songsBySource.pz : [])];
+        const fallback =
+          warmSong ?? (onlinePool.length > 0 ? onlinePool[Math.floor(Math.random() * onlinePool.length)] : null);
+        if (fallback) {
+          const source = fallback.source as ChartSourceId;
+          activeSource = source;
+          current = songsBySource[source].findIndex((item) => item.codename === fallback.codename);
+          const lp = LEVELS.find((l) => fallback.levels[l]);
+          if (lp) level = lp;
+        }
+      }
+
       // 成绩（兼容旧项目：历史记录以无源前缀的原始 codename 为 key，未命中时回退）
       const allSongs = [...localSongs, ...songsBySource.phi, ...songsBySource.ptc, ...songsBySource.pz];
       const scoreEntries = await Promise.all(
@@ -701,25 +743,8 @@
       const all = await getAllResults();
       rks = all.reduce((max, r) => Math.max(max, r.rankingScore), 0);
 
-      if (sessionWarm) {
-        // 初始化时已随机选中曲目并置 loaded；此处仅补充试听
-        playPreview(song() ?? currentList()[0] ?? null);
-      } else {
-        // 首次进入选歌页时从已加载的在线谱面源随机挑一首，避免每次固定落在 PhiCommunity 第一首。
-        // 不包含 local；pz 默认未加载时也不参与随机（只有预载命中或手动打开过 PhiZone 才计入）。
-        const onlinePool = [...songsBySource.phi, ...songsBySource.ptc, ...(pzLoaded ? songsBySource.pz : [])];
-        const randomSong = onlinePool[Math.floor(Math.random() * onlinePool.length)];
-        if (randomSong) {
-          // 在线池只由 phi/ptc/pz 组成，随机结果不可能落到 local
-          const source = randomSong.source as ChartSourceId;
-          activeSource = source;
-          current = songsBySource[source].findIndex((item) => item.codename === randomSong.codename);
-          const lp = LEVELS.find((l) => randomSong.levels[l]);
-          if (lp) level = lp;
-        }
-        loaded = true;
-        playPreview(randomSong ?? currentList()[0] ?? null);
-      }
+      loaded = true;
+      playPreview(song() ?? currentList()[0] ?? null);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       loaded = true;
@@ -746,6 +771,17 @@
       window.setTimeout(() => {
         pageReveal = true;
       }, 500);
+    }
+
+    // 首次启动流程：开场结束后落到选歌页，自动弹出设置侧边栏；
+    // 关闭侧边栏时 `closeSettings` 会询问是否进入新手教程
+    if (sessionStorage.getItem(FIRST_SETUP_FLAG) === '1') {
+      sessionStorage.removeItem(FIRST_SETUP_FLAG);
+      settingsFirstFlow = true;
+      // 等加载界面淡出后再弹出，避免与全屏加载遮罩叠在一起
+      window.setTimeout(() => {
+        showSettings = true;
+      }, 700);
     }
 
     // 全局监听拖拽移动/释放（指针离开列表项后仍能跟随）
@@ -830,8 +866,40 @@
     if (s) {
       const lp = LEVELS.find((l) => s.levels[l]);
       if (lp) level = lp;
+      scheduleLocalCache(s);
     }
     playPreview(s);
+  };
+
+  /**
+   * 选中在线谱面后延迟缓存到本地：防抖避免方向键快速浏览时把整列都下载下来。
+   * 已缓存/缓存中的谱面在 cacheOnlineSong 内部跳过。缓存完成后刷新本地列表，
+   * 让它即时出现在「本地」来源（与在线源并存）。
+   */
+  let cacheTimer = 0;
+  const CACHE_DEBOUNCE_MS = 1200;
+  const scheduleLocalCache = (item: SongItem) => {
+    clearTimeout(cacheTimer);
+    if (item.source === 'local') return;
+    const source = item.source;
+    cacheTimer = window.setTimeout(() => {
+      void cacheOnlineSong({
+        codename: item.codename,
+        source,
+        name: item.name,
+        artist: item.artist,
+        illustrationUrl: item.illustrationUrl,
+        songUrl: item.songUrl,
+        levels: item.levels,
+      })
+        .then((chart) => {
+          if (!chart) return;
+          // 已存在则跳过重复刷新
+          if (localSongs.some((l) => l.codename === chart.codename)) return;
+          localSongs = [...localSongs, localToItem(chart)];
+        })
+        .catch((e) => console.warn('本地缓存失败', e));
+    }, CACHE_DEBOUNCE_MS);
   };
 
   // ---- 左栏拖拽选歌（pointer 事件，避免浏览器默认图片拖拽/下载）----
@@ -1047,6 +1115,8 @@
 
   const onKey = (e: KeyboardEvent) => {
     if (starting) return;
+    // 设置侧边栏打开时，方向键/Enter 交给侧边栏处理，不联动选歌
+    if (showSettings) return;
     // 搜索框内输入时不响应选歌快捷键（Enter/空格会误触开始）
     if (['INPUT', 'BUTTON', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement | null)?.tagName ?? '')) return;
     if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') selectSong((current - 1 + currentList().length) % currentList().length);
@@ -1114,6 +1184,13 @@
     <div class="top-bar" class:fade-out={starting}>
       <button class="icon-btn back-btn" onclick={() => goto('/')} aria-label="返回主页"></button>
       <div class="source-tabs">
+        <button
+          class="source-tab"
+          class:active={activeSource === 'local'}
+          onclick={() => switchSource('local')}
+        >
+          本地 ({localSongs.length})
+        </button>
         {#each SOURCES as src}
           <button
             class="source-tab"
@@ -1124,13 +1201,6 @@
             {#if src === 'pz' && pzLoading}<span class="tab-loading" aria-label="加载中"></span>{/if}
           </button>
         {/each}
-        <button
-          class="source-tab"
-          class:active={activeSource === 'local'}
-          onclick={() => switchSource('local')}
-        >
-          本地 ({localSongs.length})
-        </button>
         <button class="source-tab" class:active={showRecords} onclick={() => (showRecords = !showRecords)}>
           游玩记录 ({records.length})
         </button>
@@ -1222,7 +1292,7 @@
           </button>
         {/if}
         <button class="icon-btn upload-btn" onclick={() => goto('/upload')} aria-label="上传谱面"></button>
-        <button class="icon-btn gear-btn" onclick={() => goto('/settings')} aria-label="设置"></button>
+        <button class="icon-btn gear-btn" onclick={() => (showSettings = true)} aria-label="设置"></button>
         <button class="icon-btn list-btn" onclick={() => (showOverview = true)} aria-label="谱面总览"></button>
       </div>
     </div>
@@ -1634,6 +1704,9 @@
       </div>
     </div>
   {/if}
+
+  <!-- 内联设置侧边栏：齿轮按钮打开；首次启动自动打开并在关闭时询问新手教程 -->
+  <SettingsSidebar open={showSettings} on:close={closeSettings} />
 {/if}
 
 <style>

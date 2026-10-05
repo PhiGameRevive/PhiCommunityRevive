@@ -223,3 +223,47 @@ export async function deleteLocalChart(codename: string): Promise<void> {
     db.close();
   }
 }
+
+/* ---------------- 清空（文件管理用） ---------------- */
+
+/** 清空全部本地谱面（含在线缓存副本） */
+export async function clearLocalCharts(): Promise<void> {
+  const db = await openDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const request = getChartStore(db).clear();
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/** 清空全部游玩成绩 */
+export async function clearResults(): Promise<void> {
+  const db = await openDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const request = getStore(db).clear();
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/** 清空全部回放 */
+export async function clearReplays(): Promise<void> {
+  const db = await openDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const request = getReplayStore(db).clear();
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
+}

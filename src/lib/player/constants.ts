@@ -120,9 +120,12 @@ export const SKIP_LEAD_SEC = 3;
     尾奏跳过 / 提前结算：
     - 最后一个音符判定结束后，音乐剩余超过 OUTRO_MIN_SEC 时显示「跳过尾奏」；
     - 提前结算设置开启时，最后一个音符判定结束后再等 EARLY_FINISH_DELAY 秒出结算。
+    - 但尾奏过短（剩余不足 EARLY_FINISH_MIN_OUTRO_SEC）时不提前结算，
+      否则结算动画会与尚未播完的尾奏重叠；此时让音乐自然播完再出结算。
 */
 export const OUTRO_MIN_SEC = 3;
 export const EARLY_FINISH_DELAY = 0.6;
+export const EARLY_FINISH_MIN_OUTRO_SEC = 3;
 
 /*
     失败演出：音频在此时长内线性减速至停止（毫秒）。

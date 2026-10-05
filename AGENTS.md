@@ -6,7 +6,7 @@ PhiCommunity Revive 是基于 **SvelteKit 2 + Svelte 5（legacy 模式）+ Vite 
 - 包管理一律 `pnpm`（11.x）。`patchedDependencies`/`allowBuilds` 在 `pnpm-workspace.yaml`；`package.json` 里的 `pnpm.patchedDependencies` 已被忽略，每次 pnpm 命令都会打印一条无害警告。
 - `pnpm dev`：Vite dev server（8080，`--host --open`）。
 - `pnpm check`：类型检查（`svelte-kit sync && svelte-check`）。**当前基线 0 错误 0 警告**，这是主要验证手段，不要直接跑 `tsc`（tsconfig 依赖生成的 `.svelte-kit/`）。
-- `pnpm build`：adapter-static 输出到 `build/`，GitHub Pages / Vercel / EdgeOne 均以它为产物。
+- `pnpm build`：`svelte-kit sync && vite build`，adapter-static 输出到 `build/`（fallback `404.html`），GitHub Pages / Vercel / EdgeOne 均以它为产物。
 - `pnpm preview`：在 8080 预览生产构建。
 - `pnpm lint` / `lint:fix` **是坏的**：ESLint v9 需要 `eslint.config.js`，仓库只有过时的 `.eslintrc.json`，命令必然以 exit 2 失败，别拿它当门禁。
 - `pnpm format` / `format:check`：Prettier 可用。配置：tab、单引号、分号、CRLF（`endOfLine: crlf`）、printWidth 256——改动时避免引入行尾/缩进噪音。
@@ -25,7 +25,7 @@ PhiCommunity Revive 是基于 **SvelteKit 2 + Svelte 5（legacy 模式）+ Vite 
 - Phaser 是 fork 固定提交：`phaser: github:Naptie/phaser#2b2669f…`，另有 `phaser4-rex-plugins` 的 patch（`patches/`）。不要擅自升级。
 - 谱面格式转换在 `src/lib/converters/`（RPE/PEC、Phira、Phiediter），各格式相对官方渲染的时间/坐标/旋转换算存在历史差异，务必先读文件头注释再动。
 - 成绩/本地谱面/回放存 IndexedDB：库 `PhiCommunityPlayResults` v3（objectStore：成绩、`localCharts`、`replays`），封装在 `src/lib/db.ts`。结构兼容旧项目，别改库名/键。
-- PWA：`vite-plugin-pwa` injectManifest，SW 源码 `src/sw.js`；`devOptions.enabled = false`，**开发模式没有 Service Worker**，PWA/缓存行为须用 `pnpm build && pnpm preview` 验证。大体积游戏资源由 sw.js 运行时 CacheFirst 接管（首装只预缓存应用壳）；`/cache` 页可管理缓存。
+- PWA：`vite-plugin-pwa` injectManifest，SW 源码 `src/sw.js`；`devOptions.enabled = false`，**开发模式没有 Service Worker**，PWA/缓存行为须用 `pnpm build && pnpm preview` 验证。首装只预缓存应用壳（js/css/html + favicon/图标/banner，上限 5MB），大体积游戏资源由 sw.js 运行时多级缓存接管：`phi-static`（同源静态，CacheFirst）+ 媒体/曲绘 CacheFirst（带 LRU 体积上限）+ 数据 StaleWhileRevalidate；`/cache` 页可管理缓存。
 - 音游资源（音符贴图、字体、shaders、结算音频等）在 `static/game/`，随构建原样进入 `build/`。
 
 ## 历史遗留（不要动）
