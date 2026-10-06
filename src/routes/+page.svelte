@@ -184,8 +184,8 @@
   let actx: AudioContext | null = null;
   let introBuffer: AudioBuffer | null = null;
 
-  const audioUrl = (style: IntroStyle) =>
-    style === 'new' ? '/audio/TapToStartNew.mp3' : '/audio/TapToStart.mp3';
+  /** 新版开场音乐（15 秒，第 15 秒为高潮）；旧版仍用原 8.5 秒短曲 */
+  const audioUrl = (style: IntroStyle) => (style === 'new' ? '/audio/intro3plex.mp3' : '/audio/TapToStart.mp3');
 
   /** 在用户手势内创建并 resume AudioContext（解码可以晚一点做） */
   const unlockAudio = async () => {

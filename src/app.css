@@ -1,11 +1,35 @@
 :root {
   --phi-bg: #0a0a0c;
+  --phi-bg-2: #121216;
+  --phi-bg-3: #1d1d24;
   --phi-panel: rgba(255, 255, 255, 0.04);
   --phi-border: rgba(255, 255, 255, 0.16);
+  --phi-border-strong: rgba(255, 255, 255, 0.28);
   --phi-accent: #d0d0d0;
   --phi-text: #e8e8e8;
   --phi-text-dim: rgba(232, 232, 232, 0.5);
+  --phi-text-faint: rgba(232, 232, 232, 0.32);
   --phi-mono: 'Courier New', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* 品牌色与霓虹渐变（Title.svg 的青色发光血统） */
+  --phi-brand: #0ac2ff;
+  --phi-danger: #ff5a6e;
+  --phi-good: #4fffd5;
+  --phi-gradient: linear-gradient(90deg, #0ac2ff 0%, #4f7cff 35%, #8866ee 68%, #ff66aa 100%);
+
+  /* 圆角 / 动效 */
+  --phi-radius-s: 8px;
+  --phi-radius-m: 12px;
+  --phi-radius-l: 18px;
+  --phi-radius-full: 999px;
+  --phi-dur: 0.18s;
+  --phi-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --phi-glow: 0 0 16px rgba(10, 194, 255, 0.28);
+  --phi-glow-strong: 0 0 26px rgba(10, 194, 255, 0.45);
+
+  /* 标题字体：含数字，版本号一类数字文本必须能被渲染出来 */
+  --phi-font-display:
+    'Outfit', 'Segoe UI', system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 
 * {

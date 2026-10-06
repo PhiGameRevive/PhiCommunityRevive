@@ -1,7 +1,7 @@
 /**
  * 开场动画风格开关。
  *
- * 'new'    —— 19 秒完整时间轴（TapToStartNew.mp3），高潮命中时飘落花瓣
+ * 'new'    —— 15 秒完整时间轴（intro3plex.mp3），第 15 秒高潮命中：白色频谱拉满 + 花瓣飘落
  * 'legacy' —— 旧版 8.5 秒开场（TapToStart.mp3）
  *
  * 不放进 Preferences：那个类型会整体交给 Phaser 引擎，不该混入 UI 偏好。
