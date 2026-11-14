@@ -83,6 +83,9 @@ const scenarios = [
 		musicFactor: 1,
 		cutsceneFactor: 1,
 		choiceSeconds: 6,
+		// 每拍对白都要点一次「继续」；这是操作成本，不是阅读，也不属于等待。
+		beatSeconds: 1.2,
+		hotspotSeconds: 4,
 	},
 	{
 		name: '常规首见',
@@ -92,6 +95,8 @@ const scenarios = [
 		musicFactor: 1,
 		cutsceneFactor: 1,
 		choiceSeconds: 12,
+		beatSeconds: 2,
+		hotspotSeconds: 8,
 	},
 	{
 		name: '沉浸细读',
@@ -101,18 +106,22 @@ const scenarios = [
 		musicFactor: 1,
 		cutsceneFactor: 1,
 		choiceSeconds: 20,
+		beatSeconds: 3,
+		hotspotSeconds: 12,
 	},
 ];
 
 const rows = scenarios.map((scenario) => {
 	const reading = (mandatoryReading / scenario.readingSpeed) * 60;
 	const explore = mainScenes * scenario.exploreSecondsPerScene;
+	// 拍与热点的点击/收起时间独立于阅读速度：再快的读者也要点。
+	const handling = mainBeats * scenario.beatSeconds + hotspotsRequired * scenario.hotspotSeconds;
 	const puzzles = puzzleCount * scenario.puzzleSeconds;
 	const music = trackSeconds.reduce((sum, value) => sum + value, 0) * scenario.musicFactor;
 	const cutscene = cutsceneSeconds.reduce((sum, value) => sum + value, 0) * scenario.cutsceneFactor;
 	const choices = choiceCount * scenario.choiceSeconds;
-	const total = reading + explore + puzzles + music + cutscene + choices;
-	return { name: scenario.name, reading, explore, puzzles, music, cutscene, choices, total };
+	const total = reading + explore + handling + puzzles + music + cutscene + choices;
+	return { name: scenario.name, reading, explore, handling, puzzles, music, cutscene, choices, total };
 });
 
 const minutes = (seconds) => Math.round(seconds / 60);
@@ -130,10 +139,13 @@ console.log(`\n必经阅读总量：${mandatoryReading} 汉字（对白 + 必需
 console.log('\n== 时长模型（分钟）==');
 for (const row of rows) {
 	console.log(
-		`${row.name}\n  阅读 ${minutes(row.reading)} · 调查/地图 ${minutes(row.explore)} · 谜题 ${minutes(row.puzzles)} · 音乐 ${minutes(row.music)} · 过场 ${minutes(row.cutscene)} · 选择 ${minutes(row.choices)}\n  合计 ${minutes(row.total)} 分钟（${(row.total / 3600).toFixed(2)} 小时）`,
+		`${row.name}\n  阅读 ${minutes(row.reading)} · 调查/地图 ${minutes(row.explore)} · 逐拍操作 ${minutes(row.handling)} · 谜题 ${minutes(row.puzzles)} · 音乐 ${minutes(row.music)} · 过场 ${minutes(row.cutscene)} · 选择 ${minutes(row.choices)}\n  合计 ${minutes(row.total)} 分钟（${(row.total / 3600).toFixed(2)} 小时）`,
 	);
 }
 
 const lowest = Math.min(...rows.map((row) => row.total));
 console.log(`\n模型下界：${minutes(lowest)} 分钟；是否达到 360 分钟：${lowest >= 360 ? '是' : '否'}`);
+// 保守下界的余量：决定"最低 6 小时"是否稳固，而不只看是否刚过线。
+const margin = lowest - 360 * 60;
+console.log(`相对 360 分钟的余量：${margin >= 0 ? '+' : ''}${minutes(margin)} 分钟`);
 console.log('注意：这是内容量与预算模型，不是首见实测。真实时长必须由未读剧本的测试者记录，且扣除切后台、下载与重试。');

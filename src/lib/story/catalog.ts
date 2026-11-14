@@ -53,7 +53,10 @@ export function contentMetrics(chapters = CHAPTERS) {
 	const han = (text: string) => (text.match(/\p{Script=Han}/gu) ?? []).length;
 	for (const scene of chapters.flatMap((chapter) => chapter.scenes).filter((scene) => !scene.optional)) {
 		for (const step of scene.steps) {
-			if (step.type === 'dialogue') { characters += han(step.text); dialogueBeats++; }
+			if (step.type === 'dialogue') {
+				characters += han(step.text);
+				dialogueBeats++;
+			}
 			if (step.type === 'choice') characters += han(step.prompt) + Math.min(...step.options.map((option) => han(option.text)));
 			if (step.type === 'evidence') investigationCharacters += han(step.text);
 			if (step.type === 'track') tracks.add(step.track);

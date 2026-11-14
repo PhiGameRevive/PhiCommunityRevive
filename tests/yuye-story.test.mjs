@@ -17,9 +17,15 @@ const CHAPTERS = fs
 	.sort((a, b) => a.id - b.id);
 const SCENES = CHAPTERS.flatMap((chapter) => chapter.scenes);
 const SCENE_BY_ID = new Map(SCENES.map((scene) => [scene.id, scene]));
-const TRACK_REFERENCES = SCENES.flatMap((scene) => scene.steps).filter((beat) => beat.type === 'track').map((beat) => beat.track);
-const PUZZLE_IDS = SCENES.flatMap((scene) => scene.steps).filter((beat) => beat.type === 'puzzle').map((beat) => beat.puzzle);
-const CUTSCENE_IDS = SCENES.flatMap((scene) => scene.steps).filter((beat) => beat.type === 'cutscene').map((beat) => beat.cutscene);
+const TRACK_REFERENCES = SCENES.flatMap((scene) => scene.steps)
+	.filter((beat) => beat.type === 'track')
+	.map((beat) => beat.track);
+const PUZZLE_IDS = SCENES.flatMap((scene) => scene.steps)
+	.filter((beat) => beat.type === 'puzzle')
+	.map((beat) => beat.puzzle);
+const CUTSCENE_IDS = SCENES.flatMap((scene) => scene.steps)
+	.filter((beat) => beat.type === 'cutscene')
+	.map((beat) => beat.cutscene);
 
 function receipt(track) {
 	return { track, mode: 'auto', seconds: 60 };

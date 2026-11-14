@@ -9,14 +9,15 @@ PhiCommunity Revive 是基于 **SvelteKit 2 + Svelte 5（legacy 模式）+ Vite 
 - `pnpm build`：`svelte-kit sync && vite build`，adapter-static 输出到 `build/`（fallback `404.html`），GitHub Pages / Vercel / EdgeOne 均以它为产物。
 - `pnpm preview`：在 8080 预览生产构建。
 - `pnpm lint` / `lint:fix` **是坏的**：ESLint v9 需要 `eslint.config.js`，仓库只有过时的 `.eslintrc.json`，命令必然以 exit 2 失败，别拿它当门禁。
-- `pnpm format` / `format:check`：Prettier 可用。配置：tab、单引号、分号、CRLF（`endOfLine: crlf`）、printWidth 256——改动时避免引入行尾/缩进噪音。
-- 没有测试套件；验证 = `pnpm check` + `pnpm build` + 浏览器手测。
+- `pnpm format` / `format:check`：Prettier 可用。配置：tab、单引号、分号、CRLF（`endOfLine: crlf`）、printWidth 256——改动时避免引入行尾/缩进噪音。注意 `.prettierrc` 里没有 `plugins`，直接对 `.svelte` 跑 Prettier 会报「No parser could be inferred」；要格式化 Svelte 需显式 `--plugin prettier-plugin-svelte`。
+- 故事模式（《余页》）自带测试与内容核对脚本：`pnpm test:story`（模型/存储/内容集成/内容结构，共 49 项）、`pnpm story:duration`（从实际 JSON 重算内容量与时长模型）、`pnpm story:encoding`（检查 UTF-8 与 JSON 合法性）。自由模式本身仍然没有测试套件；验证 = `pnpm check` + `pnpm build` + 浏览器手测。
 
 ## 构建与环境
 - `.env` 是 **git 跟踪的构建配置**（非秘密文件），经 `import.meta.env`（`VITE_*`）在构建期编译进前端，修改后必须重建。
 - 谱面源按部署域名**子串**选择：含 `cf`/`vercel`/`eo` 分别用 `VITE_CHARTS_SOURCE_CF/VERCEL/EO`，否则回落到 `VITE_CHARTS_SOURCE`（逻辑在 `src/lib/chartSource.ts`）。`VITE_SITE_*` 是开场节点选择页的部署地址，按 hostname **精确匹配**。
 - 谱面清单/元数据/音频/曲绘运行时从远端谱面仓库拉取（`content.json` 列目录 + 每曲 `meta.json`，见 `src/lib/meta.ts`、`src/lib/sources.ts`）。开发调试依赖网络与该源的 CORS。
 - 三路谱面源在 `src/lib/sources.ts` 聚合：`phi`（默认）/ `ptc`（PhiTogether）/ `pz`（PhiZone），codename 带 `phi-`/`ptc-`/`pz-` 前缀。
+- 故事模式《余页》在 `src/lib/story/`：内容为 `content/chapter-*.json`（`StoryChapter` 契约见 `types.ts`，运行时由 `catalog.ts` 用 `import.meta.glob` 收集），状态在 `model.ts`，独立 IndexedDB 在 `storage.ts`，界面在 `StoryApp.svelte`，路线 `/story`。它复用 `src/lib/player` 但**不写入**自由模式成绩库；改动 story 代码时不要碰 `PhiCommunityPlayResults`。源码线索在 `story-evidence/yuye/edition-01/`，由 `puzzles.ts` 以 `?raw` 导入为站内镜像。
 
 ## 架构速览
 - SPA：`src/routes/+layout.ts` 设 `ssr = false`；adapter-static 以 `fallback: 404.html` 承接未预渲染的动态路由（如 `/play/[codename]/[level]`），静态托管下表现为 SPA 回退。新增页面无需手动接线。
