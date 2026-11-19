@@ -34,18 +34,6 @@ pnpm build     # 产物输出到 build/
 
 谱面仓库部署方法请转到 [PhiCommunity-Charts-Repo](https://github.com/PhiGameRevive/PhiCommunity-Charts-Repo)
 
-## 📖 故事模式《余页》
-
-选歌页右上角的「余页 · 故事」入口（或直接访问 `/story`）会进入独立的故事模式：10 章、9 座区域、50 个调查场景、32 首曲目、9 道证据谜题、12 段黑白过场。故事画面为程式化黑白，与谱面渲染互不影响。
-
-- 存档写在独立数据库 `PhiCommunityYuye`，**不会**写入自由模式的最佳成绩、RKS、回放或本地谱面。
-- 曲目节点提供手动演奏、自动伴奏、纯聆听三种方式，都不计成绩；剧情可完整通关。
-- 含较强恐怖表现，可在故事设置的「降低动态／允许较强恐怖表现」中调整，关键剧情与结局不会因此减少。
-- 谜题 P06 的源码线索在 `story-evidence/yuye/edition-01/`，站内镜像始终可读；如需在面板显示外链，须在发布后运行 `node scripts/set-story-revision.mjs <40位提交SHA>` 再重建，未配置时会明确标注「尚未发布」。
-- 开发与验证命令：`pnpm test:story`、`pnpm story:duration`、`pnpm story:encoding`。
-
-实现现状、已验证项目与尚未验证项见 [docs/design/story-mode/implementation.md](./docs/design/story-mode/implementation.md)。
-
 ## 🌐 部署
 
 ### Github Pages

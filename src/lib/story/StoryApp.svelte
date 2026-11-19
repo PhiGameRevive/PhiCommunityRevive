@@ -90,9 +90,6 @@
 	let endingBusy = false;
 	let lastInput = Date.now();
 	let ticker: ReturnType<typeof setInterval> | undefined;
-	let dirty = false;
-	let saving = false;
-	let pendingSave = false;
 	const buffer: Record<StoryCategory, number> = { dialogue: 0, exploration: 0, puzzle: 0, music: 0, cutscene: 0 };
 
 	/* ---------------- 派生状态 ---------------- */
@@ -112,11 +109,12 @@
 	$: trackDef = performanceId ? TRACK_BY_ID[performanceId] : undefined;
 	$: puzzleTitle = puzzleId && Object.prototype.hasOwnProperty.call(PUZZLES, puzzleId) ? PUZZLES[puzzleId].title : puzzleId;
 	$: puzzleSolved = !!(save && puzzleId && save.puzzles.includes(puzzleId));
-	$: displaySpeaker = hotspotView ? (currentHotspotLine?.speaker ?? '') : feedback ? '你的选择' : beat && beat.type === 'dialogue' ? beat.speaker : '';
+	$: displaySpeaker = hotspotView ? (currentHotspotLine?.speaker ?? '') : (feedback ? '你的选择' : beat && beat.type === 'dialogue' ? beat.speaker : '');
 	$: inventoryCount = save?.evidence.length ?? 0;
 	$: chapterIsCleared = !!(save && chapter && chapterComplete(save, chapter));
 	$: sceneDone = !!(save && scene && save.completed.includes(scene.id));
 	$: endingReady = !!(save && !save.ending && CHAPTERS[9] && chapterComplete(save, CHAPTERS[9]));
+	$: totalMinutes = save ? Math.round((Object.values(save.activeSeconds).reduce((sum, value) => sum + value, 0) / 60) * 10) / 10 : 0;
 	$: countingCategory = activeCategory(save, booting, phase, mode, cutsceneId);
 
 	/* ---------------- 通用工具 ---------------- */
@@ -145,20 +143,15 @@
 		lastInput = Date.now();
 	}
 
-	/**
-	 * 局部更新存档。revision 只是写入冲突检测用的版本号，因此在这里不改它——
-	 * 真正的自增由 persist 落盘时统一完成；否则每敲一个字都会伪造一次"版本前进"。
-	 */
 	function patch(changes: Partial<StorySave>, critical = false): void {
 		if (!save) return;
-		setSave({ ...save, ...changes }, critical);
+		const next: StorySave = { ...save, ...changes, revision: save.revision + 1 };
+		setSave(next, critical);
 	}
 
 	function setSave(next: StorySave, critical = false): void {
 		save = next;
 		latest = next;
-		// 只有真正的进度/设置变更才算待保存；活动计时不算，否则会让另一标签永远追不上。
-		dirty = true;
 		if (critical) scheduleSave(0);
 		else scheduleSave();
 	}
@@ -169,32 +162,15 @@
 	}
 
 	async function persist(): Promise<void> {
-		// 已经在保存中：记下待写状态，等这一次完成后再写一次，避免并发写入相互踩踏。
-		if (saving) {
-			pendingSave = true;
-			return;
-		}
 		flushTime();
-		if (!save || !dirty) return;
-		saving = true;
-		// revision 在真正落盘时自增一次，而不是每次内存改动都自增。
-		const candidate: StorySave = { ...save, revision: save.revision + 1 };
+		if (!save) return;
 		try {
-			await commitStory(candidate);
-			save = candidate;
-			latest = candidate;
+			await commitStory(save);
 			conflict = false;
-			// 写入期间是否又有新改动？有则还要再存一次。
-			dirty = pendingSave;
 		} catch (cause) {
 			const text = message(cause);
 			conflict = text.includes('冲突');
-			dirty = true;
 			say({ kind: 'error', text: conflict ? `${text}。请重新载入后再继续，或先导出当前故事存档。` : `存档未写入：${text}` });
-		} finally {
-			saving = false;
-			pendingSave = false;
-			if (dirty && !conflict) scheduleSave(400);
 		}
 	}
 
@@ -260,15 +236,8 @@
 				}
 				save = restored;
 				latest = restored;
-				// 刷新归来只需要把 acknowledgeReload 的结果落盘；失败不应被当成读取失败。
-				if (restored !== loaded) {
-					try {
-						await commitStory(restored);
-					} catch (cause) {
-						say({ kind: 'error', text: `刷新标记未能写入：${message(cause)}。当前进度仍可继续，稍后会自动重试保存。` });
-					}
-				}
-				phase = phase === 'map' ? 'map' : 'title';
+				if (restored !== loaded) await commitStory(restored);
+				phase = 'title';
 			} else {
 				phase = 'title';
 			}
@@ -284,15 +253,14 @@
 	function onVisibility(): void {
 		if (document.visibilityState === 'hidden') {
 			flushTime();
-			// 仅在确有未保存的进度时写盘；纯计时不清洗 revision，避免卡死其他标签页。
-			if (dirty) void persist();
+			void persist();
 		}
 		lastInput = Date.now();
 	}
 
 	function onPageHide(): void {
 		flushTime();
-		if (dirty) void persist();
+		void persist();
 	}
 
 	function onTick(): void {
@@ -302,9 +270,8 @@
 		if (Date.now() - lastInput > 90_000) return;
 		buffer[category] = Math.min(5, buffer[category] + 1);
 		if (buffer[category] >= 5) {
-			// 只并入内存，不单独写盘：活动计时是诊断数据，不是进度。
-			// 若为它每几秒推进一次 revision，另一个标签页将永远无法保存。
 			flushTime();
+			scheduleSave();
 		}
 	}
 
@@ -317,7 +284,6 @@
 			if (target) next = enterScene(fresh, target, CHAPTERS);
 			save = next;
 			latest = next;
-			dirty = true;
 			await persist();
 		} else {
 			try {
@@ -343,19 +309,8 @@
 
 	async function continueStory(): Promise<void> {
 		flushTime();
-		if (dirty) await persist();
-		if (!save) return;
-		if (save.ending) {
-			phase = 'ending';
-			return;
-		}
-		const current = SCENES.find((candidate) => candidate.id === save?.scene);
-		if (current && !save.completed.includes(current.id) && sceneOpen(save, current, CHAPTERS)) {
-			phase = 'scene';
-			mode = 'story';
-			return;
-		}
-		phase = 'map';
+		await persist();
+		phase = save && save.ending ? 'ending' : 'map';
 	}
 
 	function openScene(target: StoryScene): void {
@@ -397,13 +352,6 @@
 		if (save.completed.includes(scene.id) || !beat) return;
 		if (beat.type === 'choice') return;
 		if (beat.type === 'track' || beat.type === 'puzzle' || beat.type === 'cutscene') return;
-		// 最后一拍前仍有必修物件时不要交给模型抛错：直接指路到调查抽屉。
-		if (atLastBeat && missingHotspots.length) {
-			const names = missingHotspots.map((id) => scene?.hotspots.find((hotspot) => hotspot.id === id)?.title ?? id);
-			drawer = 'hotspots';
-			say({ kind: 'info', text: `本场收尾前还要检查：${names.join('、')}。点「调查」里的物件即可，不影响已读对白。` });
-			return;
-		}
 		const before = save;
 		try {
 			const next = advance(before, scene);
@@ -418,12 +366,13 @@
 
 	function applyAdvance(before: StorySave, next: StorySave): void {
 		const wasComplete = before.completed.includes(next.scene);
-		// 逐拍推进只标脏、延迟落盘：1400 拍若每拍即时写入，revision 会无意义地暴涨，
-		// 也会让另一个标签页始终处于"刚落后"的状态。场景完成时才即时保存。
-		const finished = !wasComplete && next.completed.includes(next.scene);
-		setSave(next, finished);
+		setSave(next, true);
 		if (!save || !scene) return;
-		if (finished) clearedScene = true;
+		if (!wasComplete && next.completed.includes(scene.id)) {
+			clearedScene = true;
+			if (!chapter) return;
+			scheduleSave();
+		}
 		markInput();
 	}
 
@@ -431,12 +380,13 @@
 		if (!save || !scene || !beat || beat.type !== 'choice') return;
 		try {
 			const next = choose(save, scene, option.id);
-			const finished = next.completed.includes(scene.id);
-			setSave(next, finished);
+			setSave(next, true);
 			feedback = { label: option.label, text: option.text };
 			noteHistory('选择', `${option.label}：${option.text}`, 'choice');
 			// 选择本身可能是最后一拍：反馈读完后展示场景完成面板。
-			if (finished) clearedScene = true;
+			if (next.completed.includes(scene.id)) {
+				clearedScene = true;
+			}
 			markInput();
 		} catch (cause) {
 			say({ kind: 'error', text: message(cause) });
@@ -486,11 +436,10 @@
 
 	function onTrackComplete(receipt: StoryReceipt): void {
 		if (!save || !scene || !beat || beat.type !== 'track') return;
-		// 先把尚未满 5 秒的音乐计时并入存档，避免曲目完成时丢掉最后一段真实播放。
-		flushTime();
 		try {
-			const next = recordTrack(save as StorySave, scene, receipt);
+			const next = recordTrack(save, scene, receipt);
 			setSave(next, true);
+			buffer.music = 0;
 			trackAfter = { name: TRACK_BY_ID[beat.track]?.name ?? beat.track, text: beat.after };
 			noteHistory('演奏', `${TRACK_BY_ID[beat.track]?.name ?? beat.track} · ${receipt.mode === 'manual' ? '手动' : receipt.mode === 'auto' ? '自动伴奏' : receipt.mode === 'listen' ? '聆听' : '摘要'} · 有效 ${Math.round(receipt.seconds)} 秒`, 'note');
 		} catch (cause) {
@@ -501,8 +450,6 @@
 	}
 
 	function cancelPerformance(): void {
-		// 取消不等于没听过：已发生的有效播放时间仍计入音乐类，但不产生回执、不推进剧情。
-		flushTime();
 		performanceId = null;
 		mode = 'story';
 		say({ kind: 'info', text: '已回到剧情。本次演奏没有产生回执，可以稍后重新选择演奏方式。' });
@@ -599,7 +546,7 @@
 			const next = finishEnding(save, ending, CHAPTERS);
 			setSave(next, true);
 			flushTime();
-			if (dirty) await persist();
+			await persist();
 			noteHistory('运行方式', `${ENDINGS.find((item) => item.id === ending)?.name ?? ending}：已完成协商并记录。`, 'note');
 		} catch (cause) {
 			say({ kind: 'error', text: message(cause) });
@@ -776,7 +723,7 @@
 
 	function backToMap(): void {
 		flushTime();
-		if (dirty) void persist();
+		void persist();
 		phase = 'map';
 		mode = 'story';
 		clearedScene = false;
@@ -786,24 +733,21 @@
 		drawer = null;
 	}
 
-	async function leaveStory(): Promise<void> {
+	function leaveStory(): void {
 		flushTime();
-		if (dirty) await persist();
-		await goto('/songs');
+		void persist();
+		void goto('/songs');
 	}
 
-	/** 不足 1 分钟也显示秒数：否则刚玩的一小段会被读成 0 分钟。 */
 	function formatMinutes(seconds: number): string {
-		const value = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
-		if (value < 60) return `${Math.floor(value)} 秒`;
-		const total = Math.round(value / 60);
+		const total = Math.round(seconds / 60);
 		if (total < 60) return `${total} 分钟`;
 		return `${Math.floor(total / 60)} 小时 ${total % 60} 分钟`;
 	}
 
 	onDestroy(() => {
 		flushTime();
-		if (dirty) void persist();
+		void persist();
 	});
 </script>
 
@@ -851,23 +795,20 @@
 					<p class="eyebrow">A STORY IN FOLDED PAGES</p>
 					<h1 id="cover-title">余页</h1>
 					<p class="cover-sub">THE UNBOUND EDITION</p>
-					<p class="cover-lead">一座由来稿装订而成的城市，请你修复它的错误。每修好一处，某个人就少了一种成为自己的可能。先喝茶，再看清那些被整齐藏起的东西。</p>
+					<p class="cover-lead">
+						一座由来稿装订而成的城市，请你修复它的错误。每修好一处，某个人就少了一种成为自己的可能。先喝茶，再看清那些被整齐藏起的东西。
+					</p>
 					<ul class="cover-facts">
 						<li>十章 · 九座区域 · 三十二首曲目</li>
 						<li>黑白程序化演出，不含新增图片或配音</li>
 						<li>剧情可完整通关：手动、自动伴奏、纯聆听等价</li>
 						<li>独立故事存档，不写入自由模式成绩</li>
 					</ul>
-					{#if save}
-						<label class="restart-check"><input type="checkbox" bind:checked={confirmRestart} /> 我确认「重新开始」会替换当前故事进度（自由模式数据不受影响）</label>
-					{/if}
 					<div class="cover-actions">
 						{#if save}
 							<button type="button" class="primary" onclick={continueStory}>继续校听</button>
-							<button type="button" disabled={!confirmRestart} onclick={startNewGame}>重新开始</button>
-						{:else}
-							<button type="button" class="primary" onclick={startNewGame}>进入折页城</button>
 						{/if}
+						<button type="button" class={save ? '' : 'primary'} onclick={startNewGame}>{save ? '重新开始' : '进入折页城'}</button>
 						<button type="button" onclick={() => (drawer = 'settings')}>导入 / 设置</button>
 						<button type="button" class="ghost" onclick={leaveStory}>返回选歌</button>
 					</div>
@@ -876,7 +817,12 @@
 							当前：第 {chapter?.id ?? 0} 章 · {scene?.title ?? '未知场景'} · 已完成 {save.completed.length}/{SCENES.length} 场景 · 有效 {formatMinutes(Object.values(save.activeSeconds).reduce((sum, value) => sum + value, 0))}
 						</p>
 					{/if}
-					<p class="cover-warning">内容提示：含较强恐怖与舞台故障表现，可随时在设置中降低强度；关键剧情不会因辅助、降低恐怖或使用提示而减少。</p>
+					<p class="cover-warning">
+						内容提示：含较强恐怖与舞台故障表现，可随时在设置中降低强度；关键剧情不会因辅助、降低恐怖或使用提示而减少。
+					</p>
+					{#if save}
+						<label class="restart-check"><input type="checkbox" bind:checked={confirmRestart} /> 我确认「重新开始」会替换当前故事进度（自由模式数据不受影响）</label>
+					{/if}
 				</div>
 			</section>
 		{:else if phase === 'map'}
@@ -931,7 +877,7 @@
 				{/if}
 			</section>
 		{:else if phase === 'scene' && scene && chapter}
-			<section class="scene" class:immersive={mode !== 'story'} aria-labelledby="scene-title">
+			<section class="scene" aria-labelledby="scene-title">
 				<div class="backdrop-layer">
 					<StoryBackdrop region={backdropRegion} scene={backdropScene} speaker={displaySpeaker} changed={clearedScene || !!save?.ending} reducedMotion={prefs.reducedMotion} />
 				</div>
@@ -978,8 +924,10 @@
 								oncancel={cancelPerformance}
 								ontick={(seconds) => {
 									buffer.music = Math.min(5, buffer.music + seconds);
-									// 只并入内存；音乐计时不是进度，不单独推进存档 revision。
-									if (buffer.music >= 5) flushTime();
+									if (buffer.music >= 5) {
+										flushTime();
+										scheduleSave();
+									}
 								}}
 							/>
 						{:else if mode === 'puzzle' && puzzleId}
@@ -1112,13 +1060,7 @@
 								<p class="line">{solved ? '这组证据已经归档，可以在这里只读重看。' : '现场材料已经收齐，接下来需要把出处、关系与判断分开对照。'}</p>
 								<div class="dialogue-actions">
 									{#if solved}
-										<button
-											type="button"
-											class="primary"
-											onclick={() => {
-												if (save && scene) applyAdvance(save, advance(save, scene));
-											}}>继续剧情</button
-										>
+										<button type="button" class="primary" onclick={() => { if (save && scene) applyAdvance(save, advance(save, scene)); }}>继续剧情</button>
 										<button type="button" onclick={openPuzzle}>只读重看证据板</button>
 									{:else}
 										<button type="button" class="primary" onclick={openPuzzle}>打开证据板</button>
@@ -1132,13 +1074,7 @@
 								<p class="line">{seen ? '这段过场已记录，摘要与证据留在笔记里。' : '接下来是一段可暂停、可跳过的黑白过场。跳过后有同等剧情摘要。'}</p>
 								<div class="dialogue-actions">
 									{#if seen}
-										<button
-											type="button"
-											class="primary"
-											onclick={() => {
-												if (save && scene) applyAdvance(save, advance(save, scene));
-											}}>继续剧情</button
-										>
+										<button type="button" class="primary" onclick={() => { if (save && scene) applyAdvance(save, advance(save, scene)); }}>继续剧情</button>
 										<button type="button" onclick={playCutscene}>重看过场</button>
 									{:else}
 										<button type="button" class="primary" onclick={playCutscene}>播放过场</button>
@@ -1165,8 +1101,10 @@
 								oncomplete={onCutsceneComplete}
 								ontick={(seconds) => {
 									buffer.cutscene = Math.min(5, buffer.cutscene + seconds);
-									// 同上：过场计时只并入内存，过场本身完成时才写盘。
-									if (buffer.cutscene >= 5) flushTime();
+									if (buffer.cutscene >= 5) {
+										flushTime();
+										scheduleSave();
+									}
 								}}
 							/>
 						</div>
@@ -1272,38 +1210,14 @@
 							<h3>故事存档</h3>
 							<p class="fine">独立数据库 PhiCommunityYuye。自由模式的最佳成绩、RKS、回放与本地谱面不受影响。</p>
 							<dl class="record-grid">
-								<div>
-									<dt>内容版本</dt>
-									<dd>{save?.contentVersion ?? '—'}</dd>
-								</div>
-								<div>
-									<dt>存档 revision</dt>
-									<dd>{save?.revision ?? '—'}</dd>
-								</div>
-								<div>
-									<dt>已完成场景</dt>
-									<dd>{save?.completed.length ?? 0} / {SCENES.length}</dd>
-								</div>
-								<div>
-									<dt>证据</dt>
-									<dd>{inventoryCount}</dd>
-								</div>
-								<div>
-									<dt>谜题</dt>
-									<dd>{save?.puzzles.length ?? 0} / 9</dd>
-								</div>
-								<div>
-									<dt>过场</dt>
-									<dd>{save?.cutscenes.length ?? 0} / 12</dd>
-								</div>
-								<div>
-									<dt>曲目回执</dt>
-									<dd>{save ? Object.keys(save.trackReceipts).length : 0} / 32</dd>
-								</div>
-								<div>
-									<dt>结局</dt>
-									<dd>{save?.ending ? (ENDINGS.find((item) => item.id === save?.ending)?.name ?? '已记录') : '未选择'}</dd>
-								</div>
+								<div><dt>内容版本</dt><dd>{save?.contentVersion ?? '—'}</dd></div>
+								<div><dt>存档 revision</dt><dd>{save?.revision ?? '—'}</dd></div>
+								<div><dt>已完成场景</dt><dd>{save?.completed.length ?? 0} / {SCENES.length}</dd></div>
+								<div><dt>证据</dt><dd>{inventoryCount}</dd></div>
+								<div><dt>谜题</dt><dd>{save?.puzzles.length ?? 0} / 9</dd></div>
+								<div><dt>过场</dt><dd>{save?.cutscenes.length ?? 0} / 12</dd></div>
+								<div><dt>曲目回执</dt><dd>{save ? Object.keys(save.trackReceipts).length : 0} / 32</dd></div>
+								<div><dt>结局</dt><dd>{save?.ending ? (ENDINGS.find((item) => item.id === save?.ending)?.name ?? '已记录') : '未选择'}</dd></div>
 							</dl>
 
 							<h3>有效活动计时</h3>
@@ -1316,7 +1230,7 @@
 									</li>
 								{/each}
 							</ul>
-							<p class="total">合计 {formatMinutes(save ? Object.values(save.activeSeconds).reduce((sum, value) => sum + value, 0) : 0)}（本页以来的累计，不是已验收的首见时长）</p>
+							<p class="total">合计 {totalMinutes} 分钟（本页以来的累计，不是已验收的首见时长）</p>
 
 							<h3>章节</h3>
 							<ol class="chapter-status">
@@ -1329,9 +1243,7 @@
 							</ol>
 
 							<h3>只读诊断端口</h3>
-							<p class="fine">
-								电脑控制台可输入 <code>window.yuye.inspect('clock')</code>、<code>window.yuye.inspect('cast')</code> 或 <code>window.yuye.verify()</code>。这里的功能与手机端按钮读取同一份故事状态，不读取账号、成绩或浏览器隐私。
-							</p>
+							<p class="fine">电脑控制台可输入 <code>window.yuye.inspect('clock')</code>、<code>window.yuye.inspect('cast')</code> 或 <code>window.yuye.verify()</code>。这里的功能与手机端按钮读取同一份故事状态，不读取账号、成绩或浏览器隐私。</p>
 							<div class="diagnostic-actions">
 								<button type="button" onclick={() => say({ kind: 'info', text: refreshDiagnostic('clock') })}>钟楼诊断</button>
 								<button type="button" onclick={() => say({ kind: 'info', text: refreshDiagnostic('cast') })}>排演清单</button>
@@ -1393,29 +1305,7 @@
 		<div class="toast" class:error={banner.kind === 'error'} role="status">
 			<pre>{banner.text}</pre>
 			{#if conflict}
-				<button
-					type="button"
-					onclick={async () => {
-						const reloaded = await loadStory();
-						if (reloaded) {
-							save = reloaded;
-							latest = reloaded;
-							const target = SCENES.find((candidate) => candidate.id === reloaded.scene);
-							if (target) {
-								try {
-									save = enterScene(reloaded, target, CHAPTERS);
-									latest = save;
-								} catch {
-									phase = 'map';
-								}
-							}
-							// 载入的是磁盘上的最新版本，本页没有待写内容，可安全再次保存。
-							dirty = false;
-							conflict = false;
-							banner = null;
-						}
-					}}>重新载入存档</button
-				>
+				<button type="button" onclick={async () => { const reloaded = await loadStory(); if (reloaded) { save = reloaded; latest = reloaded; const target = SCENES.find((candidate) => candidate.id === reloaded.scene); if (target) { try { save = enterScene(reloaded, target, CHAPTERS); latest = save; } catch { phase = 'map'; } } conflict = false; banner = null; } }}>重新载入存档</button>
 			{/if}
 			<button type="button" onclick={() => (banner = null)} aria-label="关闭提示">×</button>
 		</div>
@@ -2102,17 +1992,6 @@
 		opacity: 0.6;
 	}
 
-	/* 谜题与演奏需要完整可读面积：暂时压暗背景层与场景标题，避免干扰。 */
-	.scene.immersive .backdrop-layer {
-		opacity: 0.16;
-	}
-	.scene.immersive .scene-head {
-		opacity: 0.5;
-	}
-	.scene.immersive .hotspot-rail {
-		opacity: 0.45;
-	}
-
 	/* ---------- 谜题与过场外壳 ---------- */
 
 	.puzzle-shell {
@@ -2122,7 +2001,6 @@
 		overflow-y: auto;
 		background: #0a0a0a;
 		border: 1px solid var(--line);
-		box-shadow: 0 24px 80px rgba(0, 0, 0, 0.9);
 	}
 	.puzzle-head {
 		padding: 1rem 1.1rem 0.4rem;
@@ -2151,8 +2029,7 @@
 		align-items: center;
 		justify-content: center;
 		padding: clamp(0.5rem, 2vw, 1.5rem);
-		/* 不透明：过场期间不应透出背后的场景标题与调查列表。 */
-		background: #050505;
+		background: rgba(4, 4, 4, 0.94);
 		overflow-y: auto;
 	}
 	.overlay-inner {
@@ -2517,37 +2394,23 @@
 
 	/* ---------- 提示条 ---------- */
 
-	/* 顶部右侧：避开工具栏与底部对话框，冲突提示不会挡住「继续」。 */
 	.toast {
 		position: fixed;
-		right: clamp(0.6rem, 2vw, 1.2rem);
-		top: 3.2rem;
+		left: 50%;
+		top: 3.6rem;
+		transform: translateX(-50%);
 		z-index: 70;
-		width: min(calc(100% - 1.6rem), 26rem);
+		width: min(calc(100% - 1.6rem), 46rem);
 		display: flex;
 		align-items: flex-start;
 		gap: 0.7rem;
-		padding: 0.7rem 0.85rem;
+		padding: 0.75rem 0.9rem;
 		background: #f0ece4;
 		color: #0c0c0c;
 		border: 1px solid #f0ece4;
 		box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
 		/* 提示条不遮挡剧情交互：只有它自己的按钮可点。 */
 		pointer-events: none;
-		animation: toastIn 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
-	}
-	@keyframes toastIn {
-		from {
-			opacity: 0;
-			transform: translateY(8px);
-		}
-		to {
-			opacity: 1;
-			transform: none;
-		}
-	}
-	.reduced .toast {
-		animation: none;
 	}
 	.toast pre {
 		margin: 0;
@@ -2664,9 +2527,6 @@
 	}
 	@media (prefers-reduced-motion: reduce) {
 		.dialogue {
-			animation: none;
-		}
-		.toast {
 			animation: none;
 		}
 		.drawer {

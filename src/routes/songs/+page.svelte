@@ -1291,8 +1291,8 @@
             {pzLoggedIn ? 'PhiZone ✓' : 'PhiZone 登录'}
           </button>
         {/if}
-        <button class="story-entry" onclick={() => goto('/story')}>余页 · 故事</button>
-        <button class="icon-btn upload-btn" onclick={() => goto('/upload')} aria-label="上传谱面"></button>
+				<button class="story-entry" onclick={() => goto('/story')}>余页 · 故事</button>
+				<button class="icon-btn upload-btn" onclick={() => goto('/upload')} aria-label="上传谱面"></button>
         <button class="icon-btn gear-btn" onclick={() => (showSettings = true)} aria-label="设置"></button>
         <button class="icon-btn list-btn" onclick={() => (showOverview = true)} aria-label="谱面总览"></button>
       </div>
@@ -1711,12 +1711,12 @@
 {/if}
 
 <style>
-  .story-entry {
-    flex-shrink: 0;
-    padding: 8px 12px;
-    font-size: 0.75rem;
-    border-color: rgba(255, 255, 255, 0.35);
-  }
+	.story-entry {
+		flex-shrink: 0;
+		padding: 8px 12px;
+		font-size: 0.75rem;
+		border-color: rgba(255, 255, 255, 0.35);
+	}
   .song-page {
     position: fixed;
     inset: 0;
