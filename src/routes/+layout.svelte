@@ -10,8 +10,7 @@
   let portrait = false;
   let isFullscreen = false;
   /** 弹窗小窗（MW/WW 浮窗）：opener 存在，忽略旋转/全屏引导 */
-	let isPopupWindow = false;
-	let isStory = false;
+  let isPopupWindow = false;
 
   /**
    * 界面缩放作用在 <html> 上（等价于浏览器页面缩放），因此各页面的
@@ -24,8 +23,7 @@
    * 传统响应式语法下不会被追踪，导航后不会重新求值。
    */
   const applyScaleForRoute = () => {
-		isStory = window.location.pathname.startsWith('/story');
-		const scale = window.location.pathname.startsWith('/play') || isStory ? 1 : loadUiScale();
+    const scale = window.location.pathname.startsWith('/play') ? 1 : loadUiScale();
     applyUiScale(scale);
   };
 
@@ -85,7 +83,7 @@
 </script>
 
 <!-- 手机竖屏：每次启动（含开场流程）都提示横屏；旋转设备后自动消失（弹窗小窗除外） -->
-{#if isMobile && portrait && !isPopupWindow && !isStory}
+{#if isMobile && portrait && !isPopupWindow}
   <div class="rotate-overlay">
     <div class="rotate-icon"></div>
     <p class="rotate-title">请横屏游玩</p>

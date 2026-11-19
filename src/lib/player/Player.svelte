@@ -23,7 +23,6 @@
   export let mods: ModId[] = [];
   export let scoreMultiplier = 1;
   export let recorded = true;
-  export let onExit: (() => void) | null = null;
 
   let loadingProgress = 0;
   let loadingDetail = '';
@@ -211,10 +210,6 @@
   });
 
   const exit = () => {
-    if (onExit) {
-      onExit();
-      return;
-    }
     // 浮窗模式（MW/WW）：页面运行在 window.open 的小窗中，退出直接关窗而非跳转
     try {
       if (new URLSearchParams(window.location.search).has('pop')) {
